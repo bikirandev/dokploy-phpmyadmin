@@ -59,6 +59,8 @@ In Dokploy, open **Networks** and create a network:
 
 Then, for each database that should be reachable "on this server", open the database in Dokploy, find **Networks** (Advanced tab) and add `pma-databases`. Keep `dokploy-network` attached as well if your apps use it.
 
+Attach it to the databases only, not to DB Portal's own services: `docker-compose.yml` already connects phpMyAdmin to it.
+
 ### 3. Register the portal with Bikiran
 
 - Redirect URI: `https://db.example.com/auth/callback`
@@ -79,7 +81,7 @@ pwsh scripts/generate-secrets.ps1       # Windows
 1. In your Dokploy project: **Create Service → Compose**, provider **Git** (this repository), compose path `./docker-compose.yml`, type **Docker Compose**.
 2. **Environment** tab: paste the values from [.env.example](.env.example) and fill them in.
 3. Leave the **Domains** tab empty. Routing and certificates are set by labels in `docker-compose.yml`.
-4. Leave **Isolated Deployment** off.
+4. **Advanced** tab: leave **Networks** empty for every service (no networks added, *Detach dokploy-network* off) and **Isolated Deployment** off. `docker-compose.yml` sets up all networks itself. If Dokploy adds a network to `pma`, the deploy fails with ``service pma declares mutually exclusive `network_mode` and `networks` ``.
 5. **Deploy.**
 
 ### 6. Make yourself an admin

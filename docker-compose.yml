@@ -4,7 +4,9 @@
 #   Internet ─▶ Traefik (Dokploy) ─▶ gateway ─▶ portal         (sign-in, servers, vault)
 #                                           └─▶ phpMyAdmin     (behind egress-guard's firewall)
 #
-# Do not add a domain in Dokploy's "Domains" tab: routing is defined by the labels below.
+# In Dokploy, leave this service's "Domains" tab and "Advanced > Networks" empty, and Isolated
+# Deployment off: routing and networks are defined below. (phpMyAdmin uses egress-guard's network,
+# so any network Dokploy adds to "pma" fails the deploy.)
 
 x-hardening: &hardening
   restart: unless-stopped
