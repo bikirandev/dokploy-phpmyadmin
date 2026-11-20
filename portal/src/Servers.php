@@ -12,6 +12,32 @@ final class Servers
     public const ENVIRONMENTS = ['Production', 'Staging', 'Development'];
     public const METHODS = ['internal', 'tls', 'pinned', 'ssh'];
 
+    /** Database engines: MySQL / MariaDB open in phpMyAdmin, PostgreSQL in pgAdmin. */
+    public const MYSQL = 'mysql';
+    public const POSTGRES = 'postgres';
+
+    /** The all-powerful account each engine refuses outright. */
+    public static function blockedUser(string $kind): string
+    {
+        return $kind === self::POSTGRES ? 'postgres' : 'root';
+    }
+
+    public static function defaultPort(string $kind): int
+    {
+        return $kind === self::POSTGRES ? 5432 : 3306;
+    }
+
+    /** The tool (and its host name) that opens servers of this kind. */
+    public static function app(string $kind): string
+    {
+        return $kind === self::POSTGRES ? 'pga' : 'pma';
+    }
+
+    public static function appName(string $kind): string
+    {
+        return $kind === self::POSTGRES ? 'pgAdmin' : 'phpMyAdmin';
+    }
+
     public function __construct(private readonly Db $db, private readonly Crypto $crypto)
     {
     }
@@ -67,13 +93,13 @@ final class Servers
         $now = time();
 
         return $this->db->insert(
-            'INSERT INTO servers (uid, user_id, name, environment, location, method, host, port, db_user, cred_mode,
-                secret, secret_nonce, ca_pem, pin_sha256, pin_pem, pin_strict, ssh_host, ssh_port, ssh_user, ssh_auth,
-                ssh_hostkey, ssh_fingerprint, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            'INSERT INTO servers (uid, user_id, name, environment, kind, location, method, host, port, db_user, db_name,
+                cred_mode, secret, secret_nonce, ca_pem, pin_sha256, pin_pem, pin_strict, ssh_host, ssh_port, ssh_user,
+                ssh_auth, ssh_hostkey, ssh_fingerprint, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
             [
-                $uid, $userId, $data['name'], $data['environment'], $data['location'], $data['method'],
-                $data['host'], (int) $data['port'], $data['db_user'], $data['cred_mode'],
+                $uid, $userId, $data['name'], $data['environment'], $data['kind'], $data['location'], $data['method'],
+                $data['host'], (int) $data['port'], $data['db_user'], $data['db_name'], $data['cred_mode'],
                 $secret, $nonce, $data['ca_pem'], $data['pin_sha256'], $data['pin_pem'], (int) $data['pin_strict'],
                 $data['ssh_host'], (int) $data['ssh_port'], $data['ssh_user'], $data['ssh_auth'],
                 $data['ssh_hostkey'], $data['ssh_fingerprint'], $now, $now,
@@ -90,16 +116,17 @@ final class Servers
     {
         [$secret, $nonce] = $this->sealSecrets((string) $server['uid'], (int) $server['user_id'], $secrets);
         $this->db->run(
-            'UPDATE servers SET name = ?, environment = ?, location = ?, method = ?, host = ?, port = ?, db_user = ?,
-                cred_mode = ?, secret = ?, secret_nonce = ?, ca_pem = ?, pin_sha256 = ?, pin_pem = ?, pin_strict = ?,
-                ssh_host = ?, ssh_port = ?, ssh_user = ?, ssh_auth = ?, ssh_hostkey = ?, ssh_fingerprint = ?, updated_at = ?
+            'UPDATE servers SET name = ?, environment = ?, kind = ?, location = ?, method = ?, host = ?, port = ?,
+                db_user = ?, db_name = ?, cred_mode = ?, secret = ?, secret_nonce = ?, ca_pem = ?, pin_sha256 = ?,
+                pin_pem = ?, pin_strict = ?, ssh_host = ?, ssh_port = ?, ssh_user = ?, ssh_auth = ?, ssh_hostkey = ?,
+                ssh_fingerprint = ?, engine = CASE WHEN kind = ? THEN engine ELSE \'\' END, updated_at = ?
              WHERE id = ? AND user_id = ?',
             [
-                $data['name'], $data['environment'], $data['location'], $data['method'], $data['host'],
-                (int) $data['port'], $data['db_user'], $data['cred_mode'], $secret, $nonce, $data['ca_pem'],
-                $data['pin_sha256'], $data['pin_pem'], (int) $data['pin_strict'], $data['ssh_host'],
+                $data['name'], $data['environment'], $data['kind'], $data['location'], $data['method'], $data['host'],
+                (int) $data['port'], $data['db_user'], $data['db_name'], $data['cred_mode'], $secret, $nonce,
+                $data['ca_pem'], $data['pin_sha256'], $data['pin_pem'], (int) $data['pin_strict'], $data['ssh_host'],
                 (int) $data['ssh_port'], $data['ssh_user'], $data['ssh_auth'], $data['ssh_hostkey'],
-                $data['ssh_fingerprint'], time(), (int) $server['id'], (int) $server['user_id'],
+                $data['ssh_fingerprint'], $data['kind'], time(), (int) $server['id'], (int) $server['user_id'],
             ],
         );
     }
@@ -148,7 +175,7 @@ final class Servers
     }
 
     /**
-     * What phpMyAdmin's container needs to connect. Contains plaintext credentials:
+     * What phpMyAdmin's or pgAdmin's container needs to connect. Contains plaintext credentials:
      * only ever sent over the internal network or encrypted inside a ticket.
      *
      * @param array<string, mixed> $data
@@ -157,10 +184,16 @@ final class Servers
      */
     public static function descriptor(array $data, array $secrets, string $user = '', string $key = ''): array
     {
+        $kind = (string) ($data['kind'] ?? self::MYSQL) === self::POSTGRES ? self::POSTGRES : self::MYSQL;
+
         return [
             'v' => 1,
             'key' => $key,
             'name' => (string) $data['name'],
+            'kind' => $kind,
+            'environment' => (string) ($data['environment'] ?? ''),
+            // PostgreSQL: the database pgAdmin connects to first
+            'database' => $kind === self::POSTGRES ? ((string) ($data['db_name'] ?? '') ?: 'postgres') : '',
             'method' => (string) $data['method'],
             'host' => (string) $data['host'],
             'port' => (int) $data['port'],
@@ -190,7 +223,7 @@ final class Servers
     {
         return hash('sha256', implode('|', [
             $userId, $data['method'], strtolower((string) $data['host']), $data['port'],
-            strtolower((string) $data['ssh_host']), $user,
+            strtolower((string) $data['ssh_host']), $user, $data['kind'] ?? self::MYSQL,
         ]));
     }
 }

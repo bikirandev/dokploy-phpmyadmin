@@ -22,8 +22,9 @@ cleanup() {
 trap cleanup EXIT
 
 echo "== Test certificates and keys"
-mkdir -p test/.fixtures
-if [ ! -f test/.fixtures/ca.pem ]; then
+if [ ! -f test/.fixtures/pg-pinned.pem ]; then
+  rm -rf test/.fixtures   # older or partial set: make a complete new one
+  mkdir -p test/.fixtures
   docker run --rm -v "$PWD/test/.fixtures:/out" -v "$PWD/test/fixtures/gen.sh:/gen.sh:ro" alpine:3.22 sh /gen.sh
 fi
 
@@ -63,6 +64,35 @@ USER_PMA=$("${COMPOSE[@]}" exec -T pma id -u)
 USER_PORTAL=$("${COMPOSE[@]}" exec -T portal id -u)
 [ "$USER_PORTAL" != "0" ] && pass "portal runs as a non-root user (uid $USER_PORTAL)" || fail "non-root portal" "root"
 if "${COMPOSE[@]}" exec -T pma sh -c 'touch /var/www/html/x 2>/dev/null'; then fail "read-only phpMyAdmin filesystem" "writable"; else pass "phpMyAdmin filesystem is read-only"; fi
+
+echo
+echo "== Network guard (from inside pgAdmin's container)"
+pgprobe() {
+  "${COMPOSE[@]}" exec -T pga /venv/bin/python3 -c "
+import socket
+s = socket.socket(); s.settimeout(4)
+try:
+    print('OPEN' if s.connect_ex(('$1', $2)) == 0 else 'BLOCKED')
+except OSError:
+    print('BLOCKED')"
+}
+PGA_GATEWAY_IP=$(docker network inspect "${PROJECT}_pga-egress" --format '{{(index .IPAM.Config 0).Gateway}}')
+# Dokploy's own services aren't even resolvable from pgAdmin: probe the address itself.
+INTERNAL_SVC_IP=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "${PROJECT}-internal-svc-1")
+[ "$(pgprobe portal 8080)" = "OPEN" ] && pass "portal internal API reachable" || fail "portal internal API reachable (pgAdmin)" "blocked"
+[ "$(pgprobe gateway 8080)" = "BLOCKED" ] && pass "gateway not reachable from pgAdmin" || fail "gateway not reachable (pgAdmin)" "open"
+[ "$(pgprobe pma 8080)" = "BLOCKED" ] && pass "phpMyAdmin not reachable from pgAdmin" || fail "phpMyAdmin not reachable" "open"
+[ "$(pgprobe "$PGA_GATEWAY_IP" 8443)" = "BLOCKED" ] && pass "Docker host ($PGA_GATEWAY_IP) not reachable" || fail "Docker host not reachable (pgAdmin)" "open"
+[ "$(pgprobe 169.254.169.254 80)" = "BLOCKED" ] && pass "cloud metadata address blocked" || fail "cloud metadata blocked (pgAdmin)" "open"
+[ "$(pgprobe 192.168.1.1 80)" = "BLOCKED" ] && pass "private LAN addresses blocked" || fail "private LAN blocked (pgAdmin)" "open"
+[ "$(pgprobe "$INTERNAL_SVC_IP" 80)" = "BLOCKED" ] && pass "Dokploy's own services ($INTERNAL_SVC_IP) not reachable" || fail "Dokploy services not reachable (pgAdmin)" "open"
+[ "$(pgprobe pg-local 5432)" = "OPEN" ] && pass "databases on pma-databases reachable" || fail "pma-databases reachable (pgAdmin)" "blocked"
+[ "$(pgprobe pg-tls 5432)" = "OPEN" ] && pass "remote databases reachable" || fail "remote databases reachable (pgAdmin)" "blocked"
+USER_PGA=$("${COMPOSE[@]}" exec -T pga id -u)
+[ "$USER_PGA" != "0" ] && pass "pgAdmin runs as a non-root user (uid $USER_PGA)" || fail "non-root pgAdmin" "root"
+if "${COMPOSE[@]}" exec -T pga sh -c 'touch /pgadmin4/x 2>/dev/null'; then fail "read-only pgAdmin filesystem" "writable"; else pass "pgAdmin filesystem is read-only"; fi
+SAVED=$("${COMPOSE[@]}" exec -T pga /venv/bin/python3 -c "import sqlite3; c = sqlite3.connect('/var/lib/pgadmin/pgadmin4.db'); print(c.execute('SELECT COUNT(*) FROM server WHERE password IS NOT NULL OR tunnel_password IS NOT NULL').fetchone()[0], c.execute('SELECT COUNT(*) FROM server').fetchone()[0])")
+case "$SAVED" in "0 "*) pass "pgAdmin's database holds no passwords ($SAVED)" ;; *) fail "no passwords in pgAdmin's database" "$SAVED" ;; esac
 
 echo
 echo "== Emergency sign-in link (created on the server)"

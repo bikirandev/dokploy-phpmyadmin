@@ -30,9 +30,16 @@ final class Ctx
         public readonly Auth $auth,
         public readonly Servers $servers,
         public readonly Tickets $tickets,
-        public readonly PmaClient $pma,
+        public readonly ToolClient $pma,
+        public readonly ToolClient $pga,
         public readonly Oidc $oidc,
     ) {
+    }
+
+    /** The tool that opens servers of this kind: pgAdmin for PostgreSQL, phpMyAdmin otherwise. */
+    public function tool(string $kind): ToolClient
+    {
+        return $kind === Servers::POSTGRES ? $this->pga : $this->pma;
     }
 
     public function isAdmin(): bool

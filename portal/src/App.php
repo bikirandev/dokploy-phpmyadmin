@@ -40,7 +40,7 @@ final class App
         ['GET', '#^/servers/(\d{1,10})/open$#', [ServerController::class, 'openForm']],
         ['POST', '#^/servers/(\d{1,10})/open$#', [ServerController::class, 'open']],
 
-        // On phpMyAdmin's hostname (routed by the gateway with X-DBP-Host: pma)
+        // On phpMyAdmin's and pgAdmin's hostnames (routed by the gateway with X-DBP-Host: pma or pga)
         ['GET', '#^/__dbportal/enter$#', [PmaHostController::class, 'enter']],
         ['GET', '#^/__dbportal/close$#', [PmaHostController::class, 'close']],
 
@@ -52,6 +52,9 @@ final class App
 
         ['GET', '#^/internal/pma-auth$#', [InternalController::class, 'pmaAuth']],
         ['POST', '#^/internal/descriptors$#', [InternalController::class, 'descriptors']],
+        ['GET', '#^/internal/pga-auth$#', [InternalController::class, 'pgaAuth']],
+        ['POST', '#^/internal/pga-session$#', [InternalController::class, 'pgaSession']],
+        ['POST', '#^/internal/pga-alive$#', [InternalController::class, 'pgaAlive']],
     ];
 
     public static function run(): void
@@ -64,8 +67,8 @@ final class App
             Response::text("The portal is not configured correctly. Check the container logs.\n", 500);
         }
 
-        // Opening a server submits a form that redirects to phpMyAdmin's hostname.
-        Response::$formAction = "'self' " . $cfg->pmaPublicUrl;
+        // Opening a server submits a form that redirects to phpMyAdmin's or pgAdmin's hostname.
+        Response::$formAction = "'self' " . $cfg->pmaPublicUrl . ' ' . $cfg->pgaPublicUrl;
 
         $db = new Db($cfg->dataDir . '/portal.sqlite');
         $crypto = new Crypto($cfg->vaultKey);
@@ -81,7 +84,8 @@ final class App
             auth: new Auth($db),
             servers: new Servers($db, $crypto),
             tickets: new Tickets($db),
-            pma: new PmaClient($cfg),
+            pma: new ToolClient($cfg->pmaInternalUrl, $cfg->pmaToken, 'phpMyAdmin'),
+            pga: new ToolClient($cfg->pgaInternalUrl, $cfg->pgaToken, 'pgAdmin'),
             oidc: new Oidc($cfg, $db),
         );
 

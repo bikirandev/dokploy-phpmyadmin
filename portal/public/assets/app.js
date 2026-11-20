@@ -73,6 +73,19 @@
   var form = document.getElementById('server-form');
   if (!form) { return; }
 
+  // Placeholders (default ports, example host names) follow the database engine.
+  function syncPlaceholders() {
+    var checked = form.querySelector('input[name="kind"]:checked');
+    var kind = checked && checked.value === 'postgres' ? 'postgres' : 'mysql';
+    form.querySelectorAll('[data-placeholder-' + kind + ']').forEach(function (input) {
+      input.setAttribute('placeholder', input.getAttribute('data-placeholder-' + kind));
+    });
+  }
+  form.querySelectorAll('input[name="kind"]').forEach(function (radio) {
+    radio.addEventListener('change', syncPlaceholders);
+  });
+  syncPlaceholders();
+
   // New Production servers default to "Ask every time" until the user picks a mode themselves.
   var modeTouched = false;
   var isEdit = !!form.querySelector('input[name="server_id"]');
@@ -113,7 +126,8 @@
     var map = {
       host: ['internal_host', 'host', 'ssh_db_host'], port: ['internal_port', 'port', 'ssh_db_port'],
       ssh_host: ['ssh_host'], ssh_port: ['ssh_port'], ssh_user: ['ssh_user'], ssh_key: ['ssh_key'],
-      ssh_password: ['ssh_password'], db_user: ['db_user'], db_password: ['db_password'], ca_file: ['ca_file']
+      ssh_password: ['ssh_password'], db_user: ['db_user'], db_password: ['db_password'], ca_file: ['ca_file'],
+      db_name: ['db_name']
     };
     Object.keys(errors).forEach(function (key) {
       (map[key] || []).forEach(function (name) {

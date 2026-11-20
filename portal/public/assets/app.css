@@ -289,7 +289,9 @@ fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
 .server-form:has(input[name=ssh_auth][value=password]:checked) .when-key,
 .server-form:not(:has(input[name=ssh_auth][value=password]:checked)) .when-password,
 .server-form:has(input[name=cred_mode][value=saved]:checked) .when-ask-text,
-.server-form:not(:has(input[name=cred_mode][value=saved]:checked)) .when-saved-text { display: none; }
+.server-form:not(:has(input[name=cred_mode][value=saved]:checked)) .when-saved-text,
+.server-form:has(input[name=kind][value=postgres]:checked) .when-mysql,
+.server-form:not(:has(input[name=kind][value=postgres]:checked)) .when-postgres { display: none; }
 
 /* Connection test panel */
 .status-pill { padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--surface-2); color: var(--text-2); }

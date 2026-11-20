@@ -14,7 +14,7 @@ final class Events
     public const FILTERS = [
         'all' => 'All',
         'signins' => 'Sign-ins',
-        'opens' => 'phpMyAdmin',
+        'opens' => 'Opens',
         'changes' => 'Changes',
         'problems' => 'Problems',
     ];

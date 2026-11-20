@@ -21,6 +21,7 @@ $connection = static fn (array $s): array => match ($s['method']) {
     default => ['terminal', 'SSH tunnel via ' . $s['ssh_host'], 'conn-ssh'],
 };
 $atLimit = $counts['all'] >= $limit;
+$tool = static fn (array $s): string => $s['kind'] === 'postgres' ? 'pgAdmin' : 'phpMyAdmin';
 ?>
 <div class="page-head">
   <div class="stack-8 head-text">
@@ -92,7 +93,7 @@ $atLimit = $counts['all'] >= $limit;
                   <span class="server-name"><?= e($s['name']) ?></span>
                   <span class="env <?= e($envClass[$s['environment']] ?? '') ?>"><?= e($s['environment']) ?></span>
                 </div>
-                <span class="small muted"><?= e($s['engine'] !== '' ? $s['engine'] : 'MySQL / MariaDB') ?> · <?= $s['last_opened_at'] !== null ? 'opened ' . e(View::ago((int) $s['last_opened_at'])) : 'never opened' ?></span>
+                <span class="small muted"><?= e($s['engine'] !== '' ? $s['engine'] : ($s['kind'] === 'postgres' ? 'PostgreSQL' : 'MySQL / MariaDB')) ?> · <?= $s['last_opened_at'] !== null ? 'opened ' . e(View::ago((int) $s['last_opened_at'])) : 'never opened' ?></span>
               </div>
             </div>
             <div class="server-conn stack-4 min0">
@@ -114,12 +115,12 @@ $atLimit = $counts['all'] >= $limit;
               <?php if ($s['cred_mode'] === 'saved'): ?>
                 <form method="post" action="/servers/<?= (int) $s['id'] ?>/open" target="_blank">
                   <?= csrf_field($ctx) ?>
-                  <button class="btn btn-outline" type="submit"<?= $locked ? ' disabled' : '' ?>>Open <?= icon('open') ?></button>
+                  <button class="btn btn-outline" type="submit" title="Open in <?= e($tool($s)) ?>"<?= $locked ? ' disabled' : '' ?>>Open <?= icon('open') ?></button>
                 </form>
               <?php elseif ($locked): ?>
                 <span class="btn btn-outline is-disabled" aria-disabled="true">Open <?= icon('open') ?></span>
               <?php else: ?>
-                <a class="btn btn-outline" href="/servers/<?= (int) $s['id'] ?>/open">Open <?= icon('open') ?></a>
+                <a class="btn btn-outline" href="/servers/<?= (int) $s['id'] ?>/open" title="Open in <?= e($tool($s)) ?>">Open <?= icon('open') ?></a>
               <?php endif; ?>
             </div>
           </li>
@@ -130,5 +131,5 @@ $atLimit = $counts['all'] >= $limit;
 <?php endif; ?>
 
 <p class="small muted with-icon footnote"><?= icon('shield') ?>
-  <span>phpMyAdmin runs on its own address, is only reachable through this portal, and can't reach Dokploy itself or other apps. Root logins are blocked on every server.</span>
+  <span>phpMyAdmin and pgAdmin run on their own addresses, are only reachable through this portal, and can't reach Dokploy itself or other apps. root and postgres logins are blocked on every server.</span>
 </p>

@@ -14,7 +14,7 @@ final class Settings
         'tests_per_minute' => ['label' => 'Connection tests per account', 'unit' => 'per minute', 'default' => 10, 'min' => 1, 'max' => 120],
         'failures_before_lock' => ['label' => 'Failed database logins before a server locks', 'unit' => 'attempts', 'default' => 5, 'min' => 1, 'max' => 50],
         'lock_minutes' => ['label' => 'Lock duration', 'unit' => 'minutes', 'default' => 15, 'min' => 1, 'max' => 1440],
-        'sessions_per_account' => ['label' => 'Open phpMyAdmin sessions per account', 'unit' => 'at once', 'default' => 3, 'min' => 1, 'max' => 10],
+        'sessions_per_account' => ['label' => 'Open sessions per account, in each of phpMyAdmin and pgAdmin', 'unit' => 'at once', 'default' => 3, 'min' => 1, 'max' => 10],
         'import_mb' => ['label' => 'Largest import file', 'unit' => 'MB', 'default' => 64, 'min' => 1, 'max' => 512],
         'signins_per_ip_minute' => ['label' => 'Sign-in attempts per IP address', 'unit' => 'per minute', 'default' => 10, 'min' => 1, 'max' => 300],
     ];
