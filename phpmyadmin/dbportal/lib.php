@@ -56,14 +56,6 @@ final class Env
         return self::list('EGRESS_BLOCK_CIDRS');
     }
 
-    /** This server's public IP, if the admin set it. */
-    public static function egressIp(): string
-    {
-        $ip = self::get('EGRESS_IP');
-
-        return filter_var($ip, FILTER_VALIDATE_IP) !== false ? $ip : '';
-    }
-
     /** @return list<string> */
     private static function list(string $key): array
     {
@@ -244,8 +236,8 @@ final class Net
     }
 
     /**
-     * Remote databases and SSH servers must use public addresses (or an explicitly allowed range),
-     * and never this Dokploy server's own address.
+     * Remote databases and SSH servers must use public addresses (or an explicitly allowed range).
+     * This server's own public address counts as remote too.
      */
     public static function checkRemote(string $host): void
     {
@@ -254,9 +246,6 @@ final class Net
             throw new UserError("Can't find $host. Check the host name.");
         }
         foreach ($ips as $ip) {
-            if (self::isSelf($ip)) {
-                throw new UserError("$host is this Dokploy server. For its databases, choose \"On this server\".");
-            }
             if (self::inCidrs($ip, Env::blockCidrs())) {
                 throw new UserError("Connections to $host are blocked by this portal's settings.");
             }
@@ -275,57 +264,10 @@ final class Net
         }
         $portal = self::resolve(parse_url(Env::portalInternal(), PHP_URL_HOST) ?: 'portal');
         foreach ($ips as $ip) {
-            if (self::isSelf($ip)) {
-                throw new UserError("$host is this server's public address. Enter the database's Internal Host from Dokploy instead.");
-            }
             if (in_array($ip, $portal, true) || !self::inCidrs($ip, ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', 'fc00::/7'])) {
                 throw new UserError("$host is not a database on the pma-databases network. For other servers choose \"Remote server\".");
             }
         }
-    }
-
-    public static function isSelf(string $ip): bool
-    {
-        $packed = @inet_pton($ip);
-
-        return $packed !== false
-            && in_array($packed, array_map(static fn (string $a): string|false => @inet_pton($a), self::selfAddresses()), true);
-    }
-
-    /**
-     * This Dokploy server's own addresses: EGRESS_IP, and the public addresses the portal's and
-     * phpMyAdmin's host names point to. Cached for a few minutes (checked on every connection).
-     *
-     * @return list<string>
-     */
-    public static function selfAddresses(): array
-    {
-        $file = '/run/dbportal/self-addresses.json';
-        $cached = is_file($file) ? json_decode((string) @file_get_contents($file), true) : null;
-        if (is_array($cached) && ($cached['at'] ?? 0) > time() - 300 && is_array($cached['ips'] ?? null)) {
-            return array_values(array_filter($cached['ips'], 'is_string'));
-        }
-
-        $ips = Env::egressIp() !== '' ? [Env::egressIp()] : [];
-        foreach ([Env::portalUrl(), Env::pmaUrl()] as $url) {
-            $host = parse_url($url, PHP_URL_HOST);
-            if (!is_string($host) || $host === '') {
-                continue;
-            }
-            foreach (self::resolve($host) as $ip) {
-                // Only addresses phpMyAdmin could otherwise reach matter here.
-                if (self::isPublic($ip) || self::inCidrs($ip, Env::allowCidrs())) {
-                    $ips[] = $ip;
-                }
-            }
-        }
-        $ips = array_values(array_unique($ips));
-        $tmp = $file . '.' . bin2hex(random_bytes(4));
-        if (@file_put_contents($tmp, json_encode(['at' => time(), 'ips' => $ips])) !== false) {
-            @rename($tmp, $file);
-        }
-
-        return $ips;
     }
 }
 

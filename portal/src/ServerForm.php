@@ -48,12 +48,9 @@ final class ServerForm
             $portRaw = trim($req->post('port')) ?: '3306';
         }
         $allow = $ctx->cfg->egressAllowCidrs;
-        $selfMessage = 'This is this Dokploy server\'s address. For its databases, choose "On this server".';
         if ($method === 'internal') {
             if (!NetPolicy::isHostname($host, true) && !NetPolicy::isIp($host)) {
                 $errors['host'] = 'Enter the database\'s Internal Host from Dokploy.';
-            } elseif (NetPolicy::isIp($host) && NetPolicy::isSelf($host, $ctx->cfg)) {
-                $errors['host'] = 'This is this server\'s public address. Enter the database\'s Internal Host from Dokploy (Internal Credentials → Internal Host).';
             } elseif (NetPolicy::isIp($host) && NetPolicy::isPublicIp($host)) {
                 $errors['host'] = 'This is a public address. Choose "Remote server" for it.';
             }
@@ -63,8 +60,6 @@ final class ServerForm
             }
         } elseif (!NetPolicy::isHostname($host) && !NetPolicy::isIp($host)) {
             $errors['host'] = 'Enter a host name or IP address.';
-        } elseif (NetPolicy::isIp($host) && NetPolicy::isSelf($host, $ctx->cfg)) {
-            $errors['host'] = $selfMessage;
         } elseif (NetPolicy::isIp($host) && !NetPolicy::isPublicIp($host) && !NetPolicy::inCidrs($host, $allow)) {
             $errors['host'] = 'Use the server\'s public address, or connect through an SSH tunnel.';
         }
@@ -84,8 +79,6 @@ final class ServerForm
             $sshHost = trim($req->post('ssh_host'));
             if (!NetPolicy::isHostname($sshHost) && !NetPolicy::isIp($sshHost)) {
                 $errors['ssh_host'] = 'Enter the SSH server\'s host name or IP address.';
-            } elseif (NetPolicy::isIp($sshHost) && NetPolicy::isSelf($sshHost, $ctx->cfg)) {
-                $errors['ssh_host'] = $selfMessage;
             } elseif (NetPolicy::isIp($sshHost) && !NetPolicy::isPublicIp($sshHost) && !NetPolicy::inCidrs($sshHost, $allow)) {
                 $errors['ssh_host'] = 'Use the SSH server\'s public address.';
             }

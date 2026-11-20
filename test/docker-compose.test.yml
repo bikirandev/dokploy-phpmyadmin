@@ -44,9 +44,6 @@ services:
   egress-guard:
     networks:
       test-remote: {}
-    # A host name pointing at "this server" (EGRESS_IP). phpMyAdmin shares this container's hosts file.
-    extra_hosts:
-      - this-server.test:203.0.113.10
 
   # A Dokploy database "on this server" (on the pma-databases network)
   local-db:
@@ -97,7 +94,8 @@ services:
       interval: 5s
       retries: 30
 
-  # Remote, MySQL with its auto-generated self-signed certificate (pinned, checked before connecting)
+  # Remote, MySQL with its auto-generated self-signed certificate (pinned, checked before connecting).
+  # Its address doubles as "this server's public IP" (EGRESS_IP in .env.test).
   remote-selfsigned:
     image: mysql:8.4
     environment:
@@ -107,6 +105,7 @@ services:
       MYSQL_PASSWORD: LegacyPass-2026!
     networks:
       test-remote:
+        ipv4_address: 10.250.250.200
         aliases:
           - selfsigned.test
     healthcheck:

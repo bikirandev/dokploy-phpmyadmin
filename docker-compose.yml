@@ -113,7 +113,6 @@ services:
       - no-new-privileges:true
     environment:
       PORTAL_HOST: portal
-      EGRESS_IP: ${EGRESS_IP:-}
       EGRESS_ALLOW_CIDRS: ${EGRESS_ALLOW_CIDRS:-}
       EGRESS_BLOCK_CIDRS: ${EGRESS_BLOCK_CIDRS:-}
     depends_on:
@@ -153,7 +152,6 @@ services:
       PORTAL_PUBLIC_URL: ${PORTAL_PUBLIC_URL:-https://${PORTAL_DOMAIN}}
       PORTAL_INTERNAL_URL: http://portal:8080
       PMA_TOKEN: ${PMA_TOKEN:?Set PMA_TOKEN}
-      EGRESS_IP: ${EGRESS_IP:-}
       EGRESS_ALLOW_CIDRS: ${EGRESS_ALLOW_CIDRS:-}
       EGRESS_BLOCK_CIDRS: ${EGRESS_BLOCK_CIDRS:-}
       TZ: UTC
