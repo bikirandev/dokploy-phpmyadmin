@@ -44,6 +44,9 @@ services:
   egress-guard:
     networks:
       test-remote: {}
+    # A host name pointing at "this server" (EGRESS_IP). phpMyAdmin shares this container's hosts file.
+    extra_hosts:
+      - this-server.test:203.0.113.10
 
   # A Dokploy database "on this server" (on the pma-databases network)
   local-db:

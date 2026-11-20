@@ -3,7 +3,8 @@
 # rules decide what phpMyAdmin can reach:
 #   in:  only the gateway and portal, on ports 8080 (phpMyAdmin) and 8081 (internal API)
 #   out: the portal's internal API, databases on the pma-databases network, and the public internet.
-#        Everything private (Dokploy, other apps, cloud metadata, your LAN) is blocked.
+#        Everything private (Dokploy, other apps, cloud metadata, your LAN) is blocked, and so is
+#        this server's own public address (EGRESS_IP): its databases are reached over pma-databases.
 set -eu
 
 log() { echo "[egress-guard] $*"; }
@@ -12,6 +13,17 @@ PORTAL_HOST="${PORTAL_HOST:-portal}"
 PORTAL_PORT="${PORTAL_PORT:-8080}"
 ALLOW="$(echo "${EGRESS_ALLOW_CIDRS:-}" | tr ',' ' ')"
 BLOCK="$(echo "${EGRESS_BLOCK_CIDRS:-}" | tr ',' ' ')"
+SELF4=""
+SELF6=""
+if [ -n "${EGRESS_IP:-}" ]; then
+  if echo "$EGRESS_IP" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
+    SELF4="$EGRESS_IP"
+  elif echo "$EGRESS_IP" | grep -Eq '^[0-9A-Fa-f:]*:[0-9A-Fa-f:]*$'; then
+    SELF6="$EGRESS_IP"
+  else
+    log "EGRESS_IP is not an IP address; ignoring it"
+  fi
+fi
 rm -f /run/guard-ready
 
 # Find the portal (it lives only on the internal network) to identify that network.
@@ -32,7 +44,7 @@ EGRESS_IF="$(ip -4 route show default | awk '{print $5; exit}')"
 [ "$BACKEND_IF" != "$EGRESS_IF" ] || { log "internal and egress networks share an interface"; exit 1; }
 DB_NETS="$(ip -4 -o addr show | awk -v b="$BACKEND_IF" -v e="$EGRESS_IF" '$2 != "lo" && $2 != b && $2 != e {print $4}')"
 
-log "internal: $BACKEND_IF ($PORTAL_IP), egress: $EGRESS_IF, database networks: ${DB_NETS:-none}"
+log "internal: $BACKEND_IF ($PORTAL_IP), egress: $EGRESS_IF, database networks: ${DB_NETS:-none}, this server: ${SELF4:-${SELF6:-not set}}"
 
 apply_v4() {
   iptables -P INPUT ACCEPT
@@ -57,6 +69,9 @@ apply_v4() {
   for cidr in $BLOCK; do
     iptables -A OUTPUT -d "$cidr" -j REJECT
   done
+  if [ -n "$SELF4" ]; then
+    iptables -A OUTPUT -d "$SELF4" -j REJECT || log "could not block EGRESS_IP $SELF4"
+  fi
   for cidr in $ALLOW; do
     iptables -A OUTPUT -d "$cidr" -j ACCEPT
   done
@@ -77,6 +92,9 @@ apply_v6() {
   ip6tables -A INPUT -j DROP
   ip6tables -A OUTPUT -o lo -j ACCEPT
   ip6tables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  if [ -n "$SELF6" ]; then
+    ip6tables -A OUTPUT -d "$SELF6" -j REJECT || log "could not block EGRESS_IP $SELF6"
+  fi
   for cidr in ::/128 ::1/128 ::ffff:0:0/96 64:ff9b::/96 100::/64 2001:db8::/32 fc00::/7 fe80::/10 ff00::/8; do
     ip6tables -A OUTPUT -d "$cidr" -j REJECT
   done

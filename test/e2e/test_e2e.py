@@ -315,6 +315,23 @@ def main():
     r = alice.get(f"{PMA}/index.php?route=/server/databases&server={slot}")
     check("database behind the bastion is listed", "reports" in r.text, r.status_code)
 
+    print("\n== This server's own address (EGRESS_IP=203.0.113.10) and blocked addresses")
+    code, j = alice.test_server(dict(pinned, host="203.0.113.10"))
+    check("this server's IP as a remote host points to \"On this server\"",
+          code == 422 and "On this server" in (j.get("errors") or {}).get("host", ""), (code, j))
+    code, j = alice.test_server(dict(pinned, host="this-server.test"))
+    check("a host name pointing at this server gets the same advice",
+          not j.get("ok") and "is this Dokploy server" in (j.get("error") or ""), j)
+    code, j = alice.test_server(dict(ssh, ssh_host="203.0.113.10"))
+    check("this server's IP as an SSH host points to \"On this server\"",
+          code == 422 and "On this server" in (j.get("errors") or {}).get("ssh_host", ""), (code, j))
+    code, j = alice.test_server(dict(local, internal_host="203.0.113.10"))
+    check("this server's IP as an internal host asks for the Internal Host",
+          code == 422 and "Internal Host" in (j.get("errors") or {}).get("host", ""), (code, j))
+    code, j = alice.test_server(dict(tls, host="10.250.250.250"))
+    check("an address in EGRESS_BLOCK_CIDRS says it's blocked",
+          not j.get("ok") and "blocked by this portal's settings" in (j.get("error") or ""), j)
+
     print("\n== Admin")
     r = bob.get(PORTAL + "/admin")
     check("non-admins can't open Admin", r.status_code == 404, r.status_code)

@@ -53,6 +53,8 @@ GATEWAY_IP=$(docker network inspect "${PROJECT}_pma-egress" --format '{{(index .
 [ "$(probe 169.254.169.254 80)" = "BLOCKED" ] && pass "cloud metadata address blocked" || fail "cloud metadata blocked" "open"
 [ "$(probe 192.168.1.1 80)" = "BLOCKED" ] && pass "private LAN addresses blocked" || fail "private LAN blocked" "open"
 [ "$(probe local-db 3306)" = "OPEN" ] && pass "databases on pma-databases reachable" || fail "pma-databases reachable" "blocked"
+SELF_RULE=$("${COMPOSE[@]}" exec -T egress-guard iptables -S OUTPUT | grep -c -- '-d 203.0.113.10/32 -j REJECT' || true)
+[ "${SELF_RULE:-0}" -ge 1 ] && pass "this server's own IP (EGRESS_IP) is blocked by the firewall" || fail "EGRESS_IP blocked" "no rule"
 if [ "$(probe 1.1.1.1 443)" = "OPEN" ]; then pass "public internet reachable (for remote databases)"; else echo "SKIP  public internet (no internet access here?)"; fi
 DISABLED=$("${COMPOSE[@]}" exec -T pma sh -c "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/ && php -r 'echo function_exists(\"proc_open\") ? \" proc_open-available\" : \" proc_open-disabled\";'")
 case "$DISABLED" in *proc_open-disabled*) pass "program execution disabled for PHP in phpMyAdmin" ;; *) fail "program execution disabled" "$DISABLED" ;; esac

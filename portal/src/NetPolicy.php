@@ -30,6 +30,41 @@ final class NetPolicy
         return filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_GLOBAL_RANGE) !== false;
     }
 
+    /**
+     * Whether an IP address is this Dokploy server: EGRESS_IP, or where the portal's and
+     * phpMyAdmin's host names point. Its databases are reached "On this server" instead.
+     */
+    public static function isSelf(string $ip, Config $cfg): bool
+    {
+        $packed = @inet_pton($ip);
+        if ($packed === false) {
+            return false;
+        }
+        $self = $cfg->egressIp !== '' ? [$cfg->egressIp] : [];
+        foreach ([$cfg->publicUrl, $cfg->pmaPublicUrl] as $url) {
+            $host = parse_url($url, PHP_URL_HOST);
+            if (!is_string($host) || $host === '') {
+                continue;
+            }
+            $self = array_merge($self, gethostbynamel($host) ?: []);
+            foreach (@dns_get_record($host, DNS_AAAA) ?: [] as $record) {
+                if (!empty($record['ipv6'])) {
+                    $self[] = $record['ipv6'];
+                }
+            }
+        }
+        foreach ($self as $candidate) {
+            // Only addresses phpMyAdmin could otherwise reach matter here.
+            $reachable = $candidate === $cfg->egressIp || self::isPublicIp($candidate)
+                || self::inCidrs($candidate, $cfg->egressAllowCidrs);
+            if ($reachable && @inet_pton($candidate) === $packed) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /** @param list<string> $cidrs */
     public static function inCidrs(string $ip, array $cidrs): bool
     {

@@ -110,8 +110,8 @@ Copy your user ID into `ADMIN_SUBJECTS` (comma-separated for several people) and
 | `VAULT_KEY` | yes | 32 random bytes, base64. Encrypts saved passwords and signs internal tokens |
 | `GATEWAY_TOKEN`, `PMA_TOKEN` | yes | Random, different, 32+ characters. Authenticate internal calls |
 | `ADMIN_SUBJECTS` | no | User IDs of platform admins |
-| `EGRESS_IP` | no | This server's public IP, shown to users for their firewall rules |
-| `EGRESS_BLOCK_CIDRS` | no | Extra addresses phpMyAdmin must never reach. **Set this to the server's own public IP** (e.g. `203.0.113.10/32`) so users can't reach other customers' published ports through it |
+| `EGRESS_IP` | recommended | This server's public IP. Shown to users for their firewall rules, and phpMyAdmin never connects to it (nor to the addresses the portal's own host names point to): anyone who enters it is told to add the database "On this server" instead. This also stops users from reaching other customers' published ports through it |
+| `EGRESS_BLOCK_CIDRS` | no | Extra addresses phpMyAdmin must never reach, comma-separated |
 | `EGRESS_ALLOW_CIDRS` | no | Private ranges phpMyAdmin may treat as "remote". Leave empty unless you know you need it |
 | `CLOUDFLARE_ONLY` | no | `true`: accept traffic only from Cloudflare and take the visitor IP from `CF-Connecting-IP` |
 | `PORTAL_NAME` | no | Product name in the UI (default `DB Portal`) |
@@ -128,7 +128,7 @@ Abuse limits (servers per account, tests per minute, lockouts, sessions, import 
 | Login CSRF, token replay, mix-up | Authorization code + PKCE, `state` bound to a cookie, `nonce`, issuer and audience checks, RFC 9207 `iss` check. |
 | One user reaching another's servers | Every query is scoped to the owner; tickets are bound to the user and their live session. |
 | phpMyAdmin bug (XSS) acting on the portal | phpMyAdmin runs on its own host name; portal cookies are `__Host-` and never sent there; strict CSP and CSRF tokens on the portal. |
-| Using phpMyAdmin to attack internal systems | `egress-guard` firewall: only the portal API, `pma-databases`, and public addresses. Address checks before every connection as well. |
+| Using phpMyAdmin to attack internal systems | `egress-guard` firewall: only the portal API, `pma-databases`, and public addresses, never this server's own public IP (`EGRESS_IP`). Address checks before every connection as well. |
 | A malicious "database server" | `LOAD DATA LOCAL INFILE` disabled; no program execution in phpMyAdmin's PHP; read-only filesystem; no secrets in that container. |
 | Password guessing through the portal | Lockout per account and target after repeated failures; tests per minute limit; per-IP limits at the gateway. |
 | Eavesdropping between portal and remote databases | TLS with certificate verification (the system CAs are always passed explicitly; PHP's MySQL driver otherwise skips the check), pinned self-signed certificates, or SSH with a pinned host key. Plain connections are refused. |
