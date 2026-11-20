@@ -1,6 +1,7 @@
 # Local end-to-end test environment. NOT for production.
 # Imitates a Dokploy server: Traefik on dokploy-network, a stand-in identity provider,
-# databases on the pma-databases network, and "remote" databases (TLS, self-signed, SSH).
+# databases on the pma-databases network, and "remote" databases (TLS, self-signed, SSH), for both
+# MySQL / MariaDB (phpMyAdmin) and PostgreSQL (pgAdmin).
 # Run with: test/run-e2e.sh  (relative paths below are from the repository root)
 
 services:
@@ -42,6 +43,10 @@ services:
       - host.docker.internal:host-gateway
 
   egress-guard:
+    networks:
+      test-remote: {}
+
+  pga-guard:
     networks:
       test-remote: {}
 
@@ -160,7 +165,115 @@ services:
       interval: 5s
       retries: 30
 
-  # Stands for Dokploy's own services: phpMyAdmin must never reach it.
+  # PostgreSQL "on this server" (pma-databases network), with a limited owner and a superuser
+  pg-local:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_PASSWORD: PgRoot-2026!
+    volumes:
+      - ./test/fixtures/pg-local.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - pma-databases
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 5s
+      retries: 30
+
+  # Remote PostgreSQL, TLS with a certificate from the private CA (name: pg-tls.test)
+  pg-tls:
+    image: postgres:17-alpine
+    entrypoint: ["sh", "/fixtures/pg-tls.sh"]
+    environment:
+      POSTGRES_PASSWORD: PgRoot-2026!
+      APP_DB: analytics
+      PG_CERT: pg-tls
+    volumes:
+      - ./test/.fixtures:/certs:ro
+      - ./test/fixtures:/fixtures:ro
+    networks:
+      test-remote:
+        aliases:
+          - pg-tls.test
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 5s
+      retries: 30
+
+  # Remote PostgreSQL, self-signed certificate for another name (pinned strictly)
+  pg-selfsigned:
+    image: postgres:17-alpine
+    entrypoint: ["sh", "/fixtures/pg-tls.sh"]
+    environment:
+      POSTGRES_PASSWORD: PgRoot-2026!
+      APP_DB: legacy
+      PG_CERT: pg-selfsigned
+    volumes:
+      - ./test/.fixtures:/certs:ro
+      - ./test/fixtures:/fixtures:ro
+    networks:
+      test-remote:
+        aliases:
+          - pg-selfsigned.test
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 5s
+      retries: 30
+
+  # Remote PostgreSQL, CA-signed certificate for another name (pinned by fingerprint)
+  pg-pinned:
+    image: postgres:17-alpine
+    entrypoint: ["sh", "/fixtures/pg-tls.sh"]
+    environment:
+      POSTGRES_PASSWORD: PgRoot-2026!
+      APP_DB: pinned
+      PG_CERT: pg-pinned
+    volumes:
+      - ./test/.fixtures:/certs:ro
+      - ./test/fixtures:/fixtures:ro
+    networks:
+      test-remote:
+        aliases:
+          - pg-pinned.test
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 5s
+      retries: 30
+
+  # Remote PostgreSQL without TLS (must be refused)
+  pg-plain:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_PASSWORD: PgRoot-2026!
+      APP_DB: plain
+    volumes:
+      - ./test/fixtures/pg-app.sh:/docker-entrypoint-initdb.d/app.sh:ro
+    networks:
+      test-remote:
+        aliases:
+          - pg-plain.test
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 5s
+      retries: 30
+
+  # PostgreSQL behind the SSH bastion
+  pg-ssh-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_PASSWORD: PgRoot-2026!
+      APP_DB: reports
+    volumes:
+      - ./test/fixtures/pg-app.sh:/docker-entrypoint-initdb.d/app.sh:ro
+    networks:
+      ssh-private:
+        aliases:
+          - private-pg
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 5s
+      retries: 30
+
+  # Stands for Dokploy's own services: phpMyAdmin and pgAdmin must never reach it.
   internal-svc:
     image: traefik/whoami:latest
     networks:
@@ -176,10 +289,12 @@ services:
     environment:
       PORTAL: https://db.localhost:8443
       PMA: https://pma.localhost:8443
+      PGA: https://pga.localhost:8443
       PYTHONUNBUFFERED: "1"
     extra_hosts:
       - db.localhost:host-gateway
       - pma.localhost:host-gateway
+      - pga.localhost:host-gateway
       - host.docker.internal:host-gateway
     command: ["sh", "-c", "pip install -q --disable-pip-version-check requests >/dev/null 2>&1 && python test_e2e.py"]
     networks:

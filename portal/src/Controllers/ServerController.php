@@ -12,19 +12,23 @@ use DbPortal\HttpException;
 use DbPortal\Response;
 use DbPortal\ServerForm;
 use DbPortal\Servers;
+use DbPortal\Tickets;
 
 /**
- * My servers: list, add, edit, delete, test and open in phpMyAdmin.
+ * My servers: list, add, edit, delete, test and open (MySQL / MariaDB in phpMyAdmin,
+ * PostgreSQL in pgAdmin).
  */
 final class ServerController
 {
     private const NOTICES = [
         'added' => 'Server added.',
-        'updated' => 'Server updated. Any open phpMyAdmin session for it was closed.',
+        'updated' => 'Server updated. Any open phpMyAdmin or pgAdmin session for it was closed.',
         'deleted' => 'Server deleted.',
         'closed' => 'phpMyAdmin session closed.',
+        'pga-closed' => 'pgAdmin sessions closed.',
         'signin' => 'Open a server to continue in phpMyAdmin.',
-        'open-expired' => 'That phpMyAdmin link expired. Open the server again.',
+        'pga-signin' => 'Open a PostgreSQL server to continue in pgAdmin.',
+        'open-expired' => 'That link expired. Open the server again.',
     ];
 
     public static function index(Ctx $ctx): never
@@ -56,6 +60,8 @@ final class ServerController
         $notice = self::NOTICES[$ctx->req->query('notice')] ?? '';
         if ($ctx->req->query('pma_signin') !== '') {
             $notice = self::NOTICES['signin'];
+        } elseif ($ctx->req->query('pga_signin') !== '') {
+            $notice = self::NOTICES['pga-signin'];
         }
 
         $ctx->render('servers', [
@@ -76,6 +82,7 @@ final class ServerController
     {
         Guard::user($ctx);
         self::form($ctx, null, [
+            'kind' => $ctx->req->query('kind') === Servers::POSTGRES ? Servers::POSTGRES : Servers::MYSQL,
             'location' => 'remote', 'method' => 'tls', 'environment' => 'Production',
             'cred_mode' => 'ask', 'ssh_auth' => 'key',
         ], []);
@@ -167,7 +174,7 @@ final class ServerController
             Response::json(['ok' => false, 'error' => self::lockedMessage($left)], 423);
         }
 
-        $result = $ctx->pma->test(Servers::descriptor($data, $parsed['secrets']));
+        $result = $ctx->tool((string) $data['kind'])->test(Servers::descriptor($data, $parsed['secrets']));
         $label = $data['name'] !== '' ? $data['name'] : $data['host'];
         if (!empty($result['auth_failed'])) {
             $locked = $ctx->limiter->recordFailure($target, $ctx->settings->get('failures_before_lock'), $lockSeconds);
@@ -228,6 +235,9 @@ final class ServerController
         $userId = (int) $ctx->user['id'];
         $server = self::owned($ctx, (int) $params[0]);
         $lockSeconds = $ctx->settings->get('lock_minutes') * 60;
+        $kind = (string) $server['kind'];
+        $app = Servers::app($kind);
+        $appName = Servers::appName($kind);
 
         $asked = $server['cred_mode'] !== 'saved';
         $secrets = $ctx->servers->secrets($server);
@@ -235,8 +245,10 @@ final class ServerController
         if ($asked) {
             $dbUser = trim($ctx->req->post('db_user', $dbUser)) ?: $dbUser;
             $secrets['db_password'] = $ctx->req->post('db_password');
-            if (strcasecmp($dbUser, 'root') === 0) {
-                self::openFailed($ctx, $server, $dbUser, 'root is blocked. Use a user with only the privileges it needs.');
+            if (strcasecmp($dbUser, Servers::blockedUser($kind)) === 0) {
+                self::openFailed($ctx, $server, $dbUser, $kind === Servers::POSTGRES
+                    ? 'postgres is blocked. Use a role with only the privileges it needs.'
+                    : 'root is blocked. Use a user with only the privileges it needs.');
             }
             if ($secrets['db_password'] === '') {
                 self::openFailed($ctx, $server, $dbUser, 'Enter the database password.');
@@ -249,7 +261,11 @@ final class ServerController
         }
 
         $descriptor = Servers::descriptor($server, $secrets, $dbUser);
-        $result = $ctx->pma->verify($descriptor);
+        if ($app === 'pga') {
+            // pgAdmin lists the server under this name in every browser it is opened in.
+            $descriptor['row'] = Tickets::pgaRow((string) $server['uid'], $dbUser);
+        }
+        $result = $ctx->tool($kind)->verify($descriptor);
         if (empty($result['ok'])) {
             $message = (string) ($result['error'] ?? 'Could not connect.');
             if (!empty($result['auth_failed'])) {
@@ -257,25 +273,26 @@ final class ServerController
                 $ctx->log('problem', $locked ? 'Server locked' : 'Database login failed', $server['name'] . ($locked ? ', locked for ' . intdiv($lockSeconds, 60) . ' min' : ''), $locked ? 'locked' : 'failed');
                 $message = $locked ? self::lockedMessage($lockSeconds) : 'The database rejected this user name or password.';
             } else {
-                $ctx->log('problem', 'Could not open phpMyAdmin', $server['name'] . ': ' . $message, 'failed');
+                $ctx->log('problem', "Could not open $appName", $server['name'] . ': ' . $message, 'failed');
             }
             self::openFailed($ctx, $server, $dbUser, $message);
         }
 
         $ctx->limiter->recordSuccess($target);
         $ctx->servers->markOpened((int) $server['id'], (string) ($result['version'] ?? ''));
-        [$slot, $cookie] = $ctx->tickets->issue($ctx->session, $server, $descriptor, $ctx->settings->get('sessions_per_account'));
-        $ctx->log('open', 'Opened phpMyAdmin', $server['name'] . ' as ' . $dbUser . ($asked ? ', password typed' : ''));
+        [$slot, $cookie] = $ctx->tickets->issue($ctx->session, $server, $descriptor, $ctx->settings->get('sessions_per_account'), $app);
+        $ctx->log('open', "Opened $appName", $server['name'] . ' as ' . $dbUser . ($asked ? ', password typed' : ''));
 
-        // Hand the ticket over to phpMyAdmin's hostname with a one-time code (valid 60 seconds).
+        // Hand the ticket over to the tool's hostname with a one-time code (valid 60 seconds).
         $code = Crypto::randomToken(32);
         $codeHash = hash('sha256', $code);
         [$ciphertext, $nonce] = $ctx->crypto->seal($cookie, 'dbportal/handoff/' . $codeHash);
         $ctx->db->run(
-            'INSERT INTO handoffs (code_hash, user_id, slot, ciphertext, nonce, expires_at) VALUES (?, ?, ?, ?, ?, ?)',
-            [$codeHash, $userId, $slot, new Blob($ciphertext), new Blob($nonce), time() + 60],
+            'INSERT INTO handoffs (code_hash, user_id, slot, app, ciphertext, nonce, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+            [$codeHash, $userId, $slot, $app, new Blob($ciphertext), new Blob($nonce), time() + 60],
         );
-        Response::redirect($ctx->cfg->pmaPublicUrl . '/__dbportal/enter?code=' . $code, 303);
+        $toolUrl = $app === 'pga' ? $ctx->cfg->pgaPublicUrl : $ctx->cfg->pmaPublicUrl;
+        Response::redirect($toolUrl . '/__dbportal/enter?code=' . $code, 303);
     }
 
     /** @return array<string, mixed> */

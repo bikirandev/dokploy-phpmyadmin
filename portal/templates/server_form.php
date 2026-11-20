@@ -25,6 +25,10 @@ if ($isEdit && $server['method'] === 'pinned' && $server['pin_sha256'] !== '') {
     $pinnedNow = 'SSH host key ' . $server['ssh_fingerprint'];
 }
 $testsPerMinute = $ctx->settings->get('tests_per_minute');
+$isPg = $val('kind', 'mysql') === 'postgres';
+// Placeholders follow the engine (app.js switches them when the engine changes).
+$ph = static fn (string $mysql, string $postgres): string => ' placeholder="' . e($isPg ? $postgres : $mysql) . '"'
+    . ' data-placeholder-mysql="' . e($mysql) . '" data-placeholder-postgres="' . e($postgres) . '"';
 ?>
 <nav class="breadcrumb" aria-label="Breadcrumb">
   <a href="/servers">My servers</a>
@@ -35,7 +39,7 @@ $testsPerMinute = $ctx->settings->get('tests_per_minute');
   <div class="stack-8 head-text">
     <h1><?= $isEdit ? 'Edit server' : 'Add a server' ?></h1>
     <p class="muted"><?= $isEdit
-        ? 'Saving changes closes any open phpMyAdmin session for this server.'
+        ? 'Saving changes closes any open phpMyAdmin or pgAdmin session for this server.'
         : 'Connect a database you manage. Only you will see it on your servers page.' ?></p>
   </div>
 </div>
@@ -58,8 +62,16 @@ $testsPerMinute = $ctx->settings->get('tests_per_minute');
       <section class="card form-section" aria-labelledby="sec-where">
         <div class="stack-4">
           <h2 id="sec-where">1. Where is the database?</h2>
-          <p class="small muted">This decides how phpMyAdmin connects and what protects the traffic.</p>
+          <p class="small muted">This decides how we connect and what protects the traffic.</p>
         </div>
+        <fieldset class="stack-8">
+          <legend class="label">Database engine</legend>
+          <div class="chips">
+            <label class="chip"><input class="sr-only" type="radio" name="kind" value="mysql"<?= $checked('kind', 'mysql', 'mysql') ?>><span>MySQL / MariaDB</span></label>
+            <label class="chip"><input class="sr-only" type="radio" name="kind" value="postgres"<?= $checked('kind', 'postgres', 'mysql') ?>><span>PostgreSQL</span></label>
+          </div>
+          <span class="small muted"><span class="when-mysql">Opens in phpMyAdmin.</span><span class="when-postgres">Opens in pgAdmin.</span></span>
+        </fieldset>
         <fieldset class="options">
           <legend class="sr-only">Location</legend>
           <label class="option">
@@ -73,7 +85,7 @@ $testsPerMinute = $ctx->settings->get('tests_per_minute');
             <input class="sr-only" type="radio" name="location" value="remote"<?= $checked('location', 'remote', 'remote') ?>>
             <span class="option-icon"><?= icon('globe', 20) ?></span>
             <span class="option-text"><span class="option-title">Remote server</span>
-              <span class="option-desc">Any MySQL or MariaDB server you manage, reached over TLS or an SSH tunnel.</span></span>
+              <span class="option-desc">Any database server you manage, reached over TLS or an SSH tunnel.</span></span>
             <span class="radio-dot" aria-hidden="true"></span>
           </label>
         </fieldset>
@@ -81,18 +93,18 @@ $testsPerMinute = $ctx->settings->get('tests_per_minute');
         <div class="when-local stack-18">
           <div class="field-row">
             <label class="field grow">Internal host
-              <input class="mono" type="text" name="internal_host" value="<?= e($val('internal_host')) ?>" placeholder="shop-mysql-k2j9x1" autocomplete="off" spellcheck="false"<?= $invalid('host') ?>>
+              <input class="mono" type="text" name="internal_host" value="<?= e($val('internal_host')) ?>"<?= $ph('shop-mysql-k2j9x1', 'shop-postgres-k2j9x1') ?> autocomplete="off" spellcheck="false"<?= $invalid('host') ?>>
               <?= $error('host') ?>
             </label>
             <label class="field port">Port
-              <input class="mono" type="text" name="internal_port" value="<?= e($val('internal_port')) ?>" placeholder="3306" inputmode="numeric"<?= $invalid('port') ?>>
+              <input class="mono" type="text" name="internal_port" value="<?= e($val('internal_port')) ?>"<?= $ph('3306', '5432') ?> inputmode="numeric"<?= $invalid('port') ?>>
               <?= $error('port') ?>
             </label>
           </div>
           <div class="callout callout-info"><?= icon('info', 20) ?>
             <div class="stack-4">
               <span>In Dokploy, open the database, go to Advanced → Networks and add <code>pma-databases</code>. Then copy Internal Credentials → Internal Host.</span>
-              <span class="small">phpMyAdmin can only reach databases on that network, never Dokploy itself or other apps.</span>
+              <span class="small">phpMyAdmin and pgAdmin can only reach databases on that network, never Dokploy itself or other apps.</span>
             </div>
           </div>
         </div>
@@ -134,7 +146,7 @@ $testsPerMinute = $ctx->settings->get('tests_per_minute');
                 <?= $error('host') ?>
               </label>
               <label class="field port">Port
-                <input class="mono" type="text" name="port" value="<?= e($val('port')) ?>" placeholder="3306" inputmode="numeric"<?= $invalid('port') ?>>
+                <input class="mono" type="text" name="port" value="<?= e($val('port')) ?>"<?= $ph('3306', '5432') ?> inputmode="numeric"<?= $invalid('port') ?>>
                 <?= $error('port') ?>
               </label>
             </div>
@@ -199,7 +211,7 @@ $testsPerMinute = $ctx->settings->get('tests_per_minute');
                 <input class="mono" type="text" name="ssh_db_host" value="<?= e($val('ssh_db_host')) ?>" placeholder="127.0.0.1" autocomplete="off" spellcheck="false">
               </label>
               <label class="field port">Database port
-                <input class="mono" type="text" name="ssh_db_port" value="<?= e($val('ssh_db_port')) ?>" placeholder="3306" inputmode="numeric">
+                <input class="mono" type="text" name="ssh_db_port" value="<?= e($val('ssh_db_port')) ?>"<?= $ph('3306', '5432') ?> inputmode="numeric">
               </label>
             </div>
             <div class="callout callout-info"><?= icon('info', 20) ?>
@@ -254,7 +266,12 @@ $testsPerMinute = $ctx->settings->get('tests_per_minute');
             <?= $error('db_password') ?>
           </label>
         </div>
-        <p class="small muted">Use a user with only the privileges it needs. root is always blocked.</p>
+        <label class="field when-postgres">Database (optional)
+          <input class="mono" type="text" name="db_name" value="<?= e($val('db_name')) ?>" placeholder="postgres" autocomplete="off" spellcheck="false"<?= $invalid('db_name') ?>>
+          <span class="hint">pgAdmin connects to this database first and lists the others the user may open. Leave it empty for postgres.</span>
+          <?= $error('db_name') ?>
+        </label>
+        <p class="small muted">Use a user with only the privileges it needs. <span class="when-mysql">root is always blocked.</span><span class="when-postgres">The postgres superuser is always blocked.</span></p>
         <fieldset class="stack-8">
           <legend class="label">When you open this server</legend>
           <div class="options">
@@ -306,7 +323,7 @@ $testsPerMinute = $ctx->settings->get('tests_per_minute');
         </div>
         <div class="stack-4">
           <span class="label">Database password</span>
-          <span class="small muted when-saved-text">Encrypted in the vault. Decrypted only on the server when you open phpMyAdmin; never sent to your browser.</span>
+          <span class="small muted when-saved-text">Encrypted in the vault. Decrypted only when you open the server, and never sent to your browser.</span>
           <span class="small muted when-ask-text">Not stored. You type it each time you open this server.</span>
         </div>
         <div class="stack-4 when-ssh">
@@ -324,7 +341,7 @@ $testsPerMinute = $ctx->settings->get('tests_per_minute');
       <summary id="delete-title"><?= icon('trash') ?> Delete this server</summary>
       <form method="post" action="/servers/<?= (int) $server['id'] ?>/delete" class="stack-12">
         <?= csrf_field($ctx) ?>
-        <p class="small muted">This removes the server and its saved password from the vault, and closes its open phpMyAdmin sessions. The database itself is not touched.</p>
+        <p class="small muted">This removes the server and its saved password from the vault, and closes its open phpMyAdmin or pgAdmin sessions. The database itself is not touched.</p>
         <button class="btn btn-danger" type="submit">Delete <?= e($server['name']) ?></button>
       </form>
     </details>

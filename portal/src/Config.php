@@ -19,6 +19,7 @@ final class Config
     public function __construct(
         public readonly string $publicUrl,
         public readonly string $pmaPublicUrl,
+        public readonly string $pgaPublicUrl,
         public readonly string $portalName,
         public readonly string $providerName,
         public readonly string $oidcIssuer,
@@ -36,6 +37,8 @@ final class Config
         public readonly string $gatewayToken,
         public readonly string $pmaToken,
         public readonly string $pmaInternalUrl,
+        public readonly string $pgaToken,
+        public readonly string $pgaInternalUrl,
         public readonly array $adminSubjects,
         public readonly string $dataDir,
         public readonly string $egressIp,
@@ -57,6 +60,14 @@ final class Config
         if (strcasecmp($pmaPublicUrl, $publicUrl) === 0) {
             throw new RuntimeException('PMA_PUBLIC_URL must use a different hostname from PUBLIC_URL.');
         }
+        // pgAdmin too, and apart from phpMyAdmin.
+        $pgaPublicUrl = rtrim(self::required('PGA_PUBLIC_URL'), '/');
+        if (!preg_match('#^https://[A-Za-z0-9.-]+(:\d{1,5})?$#', $pgaPublicUrl)) {
+            throw new RuntimeException('PGA_PUBLIC_URL must look like https://pg.db.example.com (https, no path).');
+        }
+        if (strcasecmp($pgaPublicUrl, $publicUrl) === 0 || strcasecmp($pgaPublicUrl, $pmaPublicUrl) === 0) {
+            throw new RuntimeException('PGA_PUBLIC_URL must use a hostname of its own (not the portal\'s or phpMyAdmin\'s).');
+        }
 
         $allowHttp = self::bool('OIDC_ALLOW_HTTP', false);
         $issuer = rtrim(self::required('OIDC_ISSUER'), '/');
@@ -74,18 +85,22 @@ final class Config
             throw new RuntimeException('VAULT_KEY must be 32 random bytes, base64-encoded (openssl rand -base64 32).');
         }
 
-        foreach (['GATEWAY_TOKEN', 'PMA_TOKEN'] as $name) {
+        $tokens = ['GATEWAY_TOKEN', 'PMA_TOKEN', 'PGA_TOKEN'];
+        foreach ($tokens as $name) {
             if (strlen(self::required($name)) < 32) {
                 throw new RuntimeException("$name must be at least 32 characters.");
             }
         }
-        if (hash_equals(self::required('GATEWAY_TOKEN'), self::required('PMA_TOKEN'))) {
-            throw new RuntimeException('GATEWAY_TOKEN and PMA_TOKEN must be different.');
+        foreach ([[0, 1], [0, 2], [1, 2]] as [$a, $b]) {
+            if (hash_equals(self::required($tokens[$a]), self::required($tokens[$b]))) {
+                throw new RuntimeException("{$tokens[$a]} and {$tokens[$b]} must be different.");
+            }
         }
 
         return new self(
             publicUrl: $publicUrl,
             pmaPublicUrl: $pmaPublicUrl,
+            pgaPublicUrl: $pgaPublicUrl,
             portalName: self::value('PORTAL_NAME', 'DB Portal') ?? 'DB Portal',
             providerName: self::value('OIDC_PROVIDER_NAME', 'Bikiran') ?? 'Bikiran',
             oidcIssuer: $issuer,
@@ -103,6 +118,8 @@ final class Config
             gatewayToken: self::required('GATEWAY_TOKEN'),
             pmaToken: self::required('PMA_TOKEN'),
             pmaInternalUrl: rtrim(self::value('PMA_INTERNAL_URL', 'http://pma:8081') ?? 'http://pma:8081', '/'),
+            pgaToken: self::required('PGA_TOKEN'),
+            pgaInternalUrl: rtrim(self::value('PGA_INTERNAL_URL', 'http://pga:8081') ?? 'http://pga:8081', '/'),
             adminSubjects: self::list('ADMIN_SUBJECTS'),
             dataDir: rtrim(self::value('DATA_DIR', '/data') ?? '/data', '/'),
             egressIp: self::value('EGRESS_IP', '') ?? '',

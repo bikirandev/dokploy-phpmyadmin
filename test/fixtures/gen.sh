@@ -17,6 +17,26 @@ openssl x509 -req -days 30 -in remote-tls.csr -CA ca.pem -CAkey ca.key -CAcreate
 openssl req -x509 -newkey rsa:2048 -nodes -days 30 -subj "/CN=strict.test" \
   -addext "subjectAltName=DNS:strict.test" -keyout strict.key -out strict.pem 2>/dev/null
 
+# PostgreSQL: a certificate from the private CA for pg-tls.test
+openssl req -newkey rsa:2048 -nodes -subj "/CN=pg-tls.test" \
+  -keyout pg-tls.key -out pg-tls.csr 2>/dev/null
+printf 'subjectAltName=DNS:pg-tls.test\nextendedKeyUsage=serverAuth\n' > pg-tls.ext
+openssl x509 -req -days 30 -in pg-tls.csr -CA ca.pem -CAkey ca.key -CAcreateserial \
+  -extfile pg-tls.ext -out pg-tls.pem 2>/dev/null
+
+# PostgreSQL: a self-signed certificate for another name, marked "not a CA" as many tools make them
+# (pinned strictly: the client library trusts exactly this certificate)
+openssl req -x509 -newkey rsa:2048 -nodes -days 30 -subj "/CN=db-internal-name" \
+  -addext "basicConstraints=critical,CA:FALSE" -addext "subjectAltName=DNS:db-internal-name" \
+  -keyout pg-selfsigned.key -out pg-selfsigned.pem 2>/dev/null
+
+# PostgreSQL: a certificate from the private CA for another name (pinned by fingerprint)
+openssl req -newkey rsa:2048 -nodes -subj "/CN=other-name.test" \
+  -keyout pg-pinned.key -out pg-pinned.csr 2>/dev/null
+printf 'subjectAltName=DNS:other-name.test\nextendedKeyUsage=serverAuth\n' > pg-pinned.ext
+openssl x509 -req -days 30 -in pg-pinned.csr -CA ca.pem -CAkey ca.key -CAcreateserial \
+  -extfile pg-pinned.ext -out pg-pinned.pem 2>/dev/null
+
 # The SSH key of the bastion user "deploy"
 ssh-keygen -q -t ed25519 -N "" -C "dbportal-test" -f deploy_ed25519
 

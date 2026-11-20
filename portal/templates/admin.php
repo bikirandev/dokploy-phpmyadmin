@@ -53,7 +53,7 @@ $me = (int) $ctx->user['id'];
   <div class="row-between wrap-gap">
     <div class="stack-4">
       <h2 id="accounts-title" class="h-section">Accounts</h2>
-      <p class="small muted">Suspending signs the account out everywhere and closes its phpMyAdmin sessions. Its saved passwords stay encrypted.</p>
+      <p class="small muted">Suspending signs the account out everywhere and closes its phpMyAdmin and pgAdmin sessions. Its saved passwords stay encrypted.</p>
     </div>
     <form class="search" method="get" action="/admin" role="search">
       <?= icon('search', 18) ?>

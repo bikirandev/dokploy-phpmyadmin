@@ -28,6 +28,17 @@ upstream pma_up {
     keepalive 16;
 }
 
+upstream pga_up {
+    server pga:8080;
+    keepalive 16;
+}
+
+# pgAdmin's ERD and Schema Diff tools use WebSockets.
+map $http_upgrade $dbp_connection {
+    default upgrade;
+    ""      "";
+}
+
 # Unknown host names get nothing.
 server {
     listen 8080 default_server;
@@ -161,5 +172,95 @@ server {
     location @too_large {
         default_type text/plain;
         return 413 "This file is larger than the import limit. Ask an admin to raise it.\n";
+    }
+}
+
+# pgAdmin, on its own host name. Every request is checked with the portal first.
+server {
+    listen 8080;
+    server_name ${PGA_HOST};
+
+    include /etc/nginx/conf.d/cloudflare-allow.inc;
+
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    # pgAdmin checks the Referer of its own requests (CSRF), so same-origin requests keep it.
+    add_header Referrer-Policy "same-origin" always;
+    add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=()" always;
+    add_header Cross-Origin-Opener-Policy "same-origin" always;
+    add_header X-Robots-Tag "noindex, nofollow" always;
+
+    limit_req zone=perip burst=200 nodelay;
+    limit_conn conn 60;
+
+    # Asks the portal: does this request carry a live pgAdmin session?
+    location = /_dbp_auth {
+        internal;
+        proxy_http_version 1.1;
+        proxy_pass_request_body off;
+        proxy_set_header Connection "";
+        proxy_set_header Content-Length "";
+        proxy_set_header Upgrade "";
+        proxy_set_header Cookie $http_cookie;
+        proxy_set_header X-Real-IP $client_ip;
+        proxy_set_header X-Original-Method $request_method;
+        proxy_set_header X-Original-Length $content_length;
+        proxy_set_header X-Internal-Token "${GATEWAY_TOKEN}";
+        proxy_set_header X-DBP-Host "";
+        proxy_set_header X-DBP-Assertion "";
+        proxy_pass http://portal_up/internal/pga-auth;
+    }
+
+    # Hand-over and sign-out of pgAdmin sessions (served by the portal on this host name).
+    location ^~ /__dbportal/ {
+        limit_req zone=signin burst=20 nodelay;
+        include /etc/nginx/proxy-base.inc;
+        proxy_set_header X-DBP-Host pga;
+        proxy_set_header X-DBP-Assertion "";
+        proxy_set_header X-Internal-Token "";
+        proxy_hide_header X-Powered-By;
+        proxy_pass http://portal_up;
+    }
+
+    location / {
+        auth_request /_dbp_auth;
+        auth_request_set $dbp_assertion $upstream_http_x_dbp_assertion;
+        error_page 401 = @signin;
+        error_page 403 = @too_large;
+
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $dbp_connection;
+        # Keeps the port the browser used: pgAdmin compares the Referer with it.
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $client_ip;
+        proxy_set_header X-Forwarded-For $client_ip;
+        proxy_set_header X-Forwarded-Proto https;
+        # Headers pgAdmin (or the layer in front of it) would otherwise believe.
+        proxy_set_header X-Forwarded-Host "";
+        proxy_set_header X-Forwarded-Port "";
+        proxy_set_header X-Forwarded-Prefix "";
+        proxy_set_header X-Script-Name "";
+        proxy_set_header X-Scheme "";
+        proxy_set_header Remote-User "";
+        proxy_set_header X-Pgadmin-Webserver-Secret "";
+        proxy_set_header X-DBP-Assertion $dbp_assertion;
+        proxy_set_header X-DBP-Host "";
+        proxy_set_header X-Internal-Token "";
+        proxy_hide_header X-Content-Type-Options;
+        proxy_hide_header Referrer-Policy;
+        proxy_hide_header X-Remote-User;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+        proxy_pass http://pga_up;
+    }
+
+    location @signin {
+        return 302 ${PORTAL_PUBLIC_URL}/servers?pga_signin=1;
+    }
+
+    location @too_large {
+        default_type text/plain;
+        return 413 "This file is larger than the upload limit. Ask an admin to raise it.\n";
     }
 }

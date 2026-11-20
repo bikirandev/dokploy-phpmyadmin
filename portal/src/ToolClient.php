@@ -7,12 +7,16 @@ namespace DbPortal;
 use RuntimeException;
 
 /**
- * Asks phpMyAdmin's container (the only part allowed to reach databases) to test a connection.
+ * Asks a tool's container (phpMyAdmin's or pgAdmin's: the only parts allowed to reach databases)
+ * to test a connection.
  */
-final class PmaClient
+final class ToolClient
 {
-    public function __construct(private readonly Config $cfg)
-    {
+    public function __construct(
+        private readonly string $baseUrl,
+        private readonly string $token,
+        public readonly string $label,
+    ) {
     }
 
     /**
@@ -27,7 +31,7 @@ final class PmaClient
     }
 
     /**
-     * Quick login check before opening phpMyAdmin.
+     * Quick login check before opening the tool.
      *
      * @param array<string, mixed> $descriptor
      * @return array<string, mixed>
@@ -46,17 +50,17 @@ final class PmaClient
         try {
             $res = HttpClient::request(
                 'POST',
-                $this->cfg->pmaInternalUrl . '/' . $action,
-                ['Content-Type: application/json', 'X-Internal-Token: ' . $this->cfg->pmaToken],
+                $this->baseUrl . '/' . $action,
+                ['Content-Type: application/json', 'X-Internal-Token: ' . $this->token],
                 json_encode(['descriptor' => $descriptor], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES),
                 $timeout,
             );
         } catch (RuntimeException) {
-            return ['ok' => false, 'error' => 'phpMyAdmin is not reachable right now. Try again in a minute.'];
+            return ['ok' => false, 'error' => $this->label . ' is not reachable right now. Try again in a minute.'];
         }
         $data = json_decode($res['body'], true);
         if ($res['status'] !== 200 || !is_array($data)) {
-            return ['ok' => false, 'error' => 'phpMyAdmin returned an unexpected answer.'];
+            return ['ok' => false, 'error' => $this->label . ' returned an unexpected answer.'];
         }
 
         return $data;

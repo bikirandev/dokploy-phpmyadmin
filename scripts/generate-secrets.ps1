@@ -9,3 +9,4 @@ function New-RandomBytes([int]$Count) {
 "VAULT_KEY=" + [Convert]::ToBase64String((New-RandomBytes 32))
 "GATEWAY_TOKEN=" + (-join ((New-RandomBytes 32) | ForEach-Object { $_.ToString("x2") }))
 "PMA_TOKEN=" + (-join ((New-RandomBytes 32) | ForEach-Object { $_.ToString("x2") }))
+"PGA_TOKEN=" + (-join ((New-RandomBytes 32) | ForEach-Object { $_.ToString("x2") }))

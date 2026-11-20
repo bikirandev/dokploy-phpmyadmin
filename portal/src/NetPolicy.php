@@ -6,7 +6,7 @@ namespace DbPortal;
 
 /**
  * Address checks done in the portal for friendly error messages.
- * The real enforcement happens in phpMyAdmin's container and its network guard.
+ * The real enforcement happens in the tools' containers (phpMyAdmin, pgAdmin) and their network guards.
  */
 final class NetPolicy
 {

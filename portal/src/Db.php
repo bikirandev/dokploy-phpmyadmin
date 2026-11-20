@@ -129,6 +129,14 @@ final class Db
             expires_at INTEGER NOT NULL
         );
         SQL,
+        // 2: PostgreSQL servers, opened in pgAdmin ("pga") next to phpMyAdmin ("pma")
+        <<<'SQL'
+        ALTER TABLE servers ADD COLUMN kind TEXT NOT NULL DEFAULT 'mysql';
+        ALTER TABLE servers ADD COLUMN db_name TEXT NOT NULL DEFAULT '';
+        ALTER TABLE tickets ADD COLUMN app TEXT NOT NULL DEFAULT 'pma';
+        ALTER TABLE tickets ADD COLUMN db_user TEXT NOT NULL DEFAULT '';
+        ALTER TABLE handoffs ADD COLUMN app TEXT NOT NULL DEFAULT 'pma';
+        SQL,
     ];
 
     private PDO $pdo;

@@ -16,6 +16,7 @@ urllib3.disable_warnings()
 
 PORTAL = os.environ.get("PORTAL", "https://db.localhost:8443")
 PMA = os.environ.get("PMA", "https://pma.localhost:8443")
+PGA = os.environ.get("PGA", "https://pga.localhost:8443")
 FIXTURES = "/fixtures"
 
 LIMIT_DEFAULTS = {
@@ -38,7 +39,8 @@ def check(name, condition, detail=""):
 
 def server_data(**overrides):
     data = {
-        "name": "Test server", "environment": "Development", "location": "remote", "method": "tls",
+        "name": "Test server", "environment": "Development", "kind": "mysql", "db_name": "",
+        "location": "remote", "method": "tls",
         "host": "", "port": "3306", "internal_host": "", "internal_port": "3306",
         "ssh_host": "", "ssh_port": "22", "ssh_user": "", "ssh_auth": "key", "ssh_key": "", "ssh_password": "",
         "ssh_db_host": "", "ssh_db_port": "3306", "db_user": "", "db_password": "", "cred_mode": "saved",
@@ -118,6 +120,80 @@ class User:
         page = self.get(PMA + location if location.startswith("/") else location)
         return page, (int(m.group(1)) if m else None), enter.headers.get("Set-Cookie", "")
 
+    def open_pg(self, server_id, extra=None):
+        """Opens a PostgreSQL server and follows the hand-over into pgAdmin. Returns (page, cookie header)."""
+        data = {"_csrf": self.csrf}
+        data.update(extra or {})
+        r = self.post(f"{PORTAL}/servers/{server_id}/open", data=data)
+        if r.status_code != 303 or not r.headers.get("Location", "").startswith(PGA + "/__dbportal/enter"):
+            return r, ""
+        enter = self.get(r.headers["Location"])
+        location = enter.headers.get("Location", "")
+        page = self.get(PGA + location if location.startswith("/") else location)
+        for _ in range(3):  # pgAdmin signs in (portal-backed), then shows its main page
+            if page.status_code not in (301, 302, 303) or "Location" not in page.headers:
+                break
+            nxt = page.headers["Location"]
+            page = self.get(PGA + nxt if nxt.startswith("/") else nxt)
+        return page, enter.headers.get("Set-Cookie", "")
+
+
+class PgAdmin:
+    """Talks to pgAdmin's JSON API the way its own page does."""
+
+    def __init__(self, user):
+        self.user = user
+        self.token = ""
+
+    def load(self):
+        r = self.user.get(PGA + "/browser/js/utils.js")
+        m = re.search(r"pgAdmin\['csrf_token'\] = '([^']+)'", r.text)
+        self.token = m.group(1) if m else ""
+        return r
+
+    def call(self, method, path, body=None, timeout=90):
+        headers = {"X-pgA-CSRFToken": self.token, "Referer": PGA + "/browser/", "Accept": "application/json",
+                   "X-Requested-With": "XMLHttpRequest"}
+        kw = {"headers": headers, "allow_redirects": False, "timeout": timeout}
+        if body is not None:
+            kw["json"] = body
+        r = self.user.session.request(method, PGA + path, **kw)
+        try:
+            data = r.json()
+        except ValueError:
+            data = {"raw": r.text[:300]}
+        return r.status_code, data
+
+    def nodes(self, path):
+        code, data = self.call("GET", path)
+        # pgAdmin answers tree requests in "data" or, for some nodes, in "result"
+        items = (data.get("data") or data.get("result")) if isinstance(data, dict) else None
+        return {n.get("label"): n.get("_id") for n in items or [] if isinstance(n, dict)} if code == 200 else {}
+
+    def group(self):
+        return self.nodes("/browser/server_group/nodes/").get("DB Portal")
+
+    def databases(self, gid, sid):
+        return self.nodes(f"/browser/database/nodes/{gid}/{sid}/")
+
+
+def pga_cookie(user):
+    for c in user.session.cookies:
+        if c.name == "__Host-pga_session" and "pga" in (c.domain or ""):
+            return c.value
+    return ""
+
+
+def pga_home(user):
+    """Loads pgAdmin's page like a browser tab does (following its sign-in redirects)."""
+    r = user.get(PGA + "/", headers={"Accept": "text/html"})
+    for _ in range(3):
+        if r.status_code not in (301, 302, 303) or "Location" not in r.headers:
+            break
+        nxt = r.headers["Location"]
+        r = user.get(PGA + nxt if nxt.startswith("/") else nxt, headers={"Accept": "text/html"})
+    return r
+
 
 def main():
     anon = User("anonymous")
@@ -153,6 +229,18 @@ def main():
     anon.session.cookies.set("__Host-dbp_s1", "A" * 43 + "." + "B" * 43, domain="pma.localhost", path="/")
     r = anon.get(PMA + "/index.php")
     check("a forged phpMyAdmin session cookie is refused", r.status_code == 302, r.status_code)
+    for path in ["/", "/browser/", "/misc/ping", "/static/js/generated/app.bundle.js", "/socket.io/?EIO=4&transport=polling"]:
+        r = anon.get(PGA + path)
+        check(f"pgAdmin {path} needs a session", r.status_code == 302
+              and r.headers.get("Location", "").startswith(PORTAL + "/servers"), f"{r.status_code} {r.headers.get('Location')}")
+    for path in ["/internal/pga-auth", "/internal/pga-session", "/internal/pga-alive"]:
+        r = anon.post(PORTAL + path, json={}) if path != "/internal/pga-auth" else anon.get(PORTAL + path)
+        check(f"internal endpoint {path} hidden", r.status_code == 404, r.status_code)
+    anon.session.cookies.set("__Host-dbp_g1", "A" * 43 + "." + "B" * 43, domain="pga.localhost", path="/")
+    r = anon.get(PGA + "/browser/")
+    check("a forged pgAdmin session cookie is refused", r.status_code == 302, r.status_code)
+    r = anon.get(PGA + "/browser/", headers={"Remote-User": "dbp-" + "0" * 24, "X-Dbp-Assertion": "x.y"})
+    check("pgAdmin ignores identity headers sent by the browser", r.status_code == 302, r.status_code)
 
     print("\n== Sign-in (alice is a platform admin)")
     alice = User("alice")
@@ -315,6 +403,174 @@ def main():
     r = alice.get(f"{PMA}/index.php?route=/server/databases&server={slot}")
     check("database behind the bastion is listed", "reports" in r.text, r.status_code)
 
+    print("\n== PostgreSQL on this server, opened in pgAdmin (own host name)")
+    pglocal = server_data(kind="postgres", name="Shop PG", environment="Production", location="local",
+                          internal_host="pg-local", internal_port="", db_user="shop_owner",
+                          db_password="ShopPg-2026!", db_name="shop", cred_mode="saved")
+    code, j = alice.test_server(pglocal)
+    check("PostgreSQL test reaches the local database", code == 200 and j.get("ok"), j)
+    check("test shows the PostgreSQL version", any(c.startswith("PostgreSQL 17") for c in j.get("checks", [])), j.get("checks"))
+    check("test shows what the role may do, not a superuser",
+          any("Owns databases: shop" in g for g in j.get("grants", [])) and not j.get("superuser"), j)
+    code, j = alice.test_server(dict(pglocal, db_user="postgres", db_password="PgRoot-2026!"))
+    check("the postgres superuser is blocked", not j.get("ok") and "postgres is blocked" in json.dumps(j), j)
+    code, j = alice.test_server(dict(pglocal, db_user="boss_admin", db_password="BossPg-2026!"))
+    check("another superuser role is flagged", j.get("ok") and j.get("superuser"), j)
+    code, j = alice.test_server(dict(pglocal, db_password="wrong"))
+    check("a wrong PostgreSQL password is reported", not j.get("ok") and "rejected" in (j.get("error") or ""), j)
+    code, j = alice.test_server(dict(pglocal, db_name="nope"))
+    check("a missing database is explained", not j.get("ok") and "doesn't exist" in (j.get("error") or ""), j)
+    for host, port in [("internal-svc", "80"), ("portal", "8080"), ("gateway", "8080"), ("pma", "8080")]:
+        code, j = alice.test_server(dict(pglocal, internal_host=host, internal_port=port))
+        check(f"pgAdmin can't use '{host}' as a database", not j.get("ok"), j)
+    r = alice.form("/servers", pglocal)
+    check("PostgreSQL server saved", r.status_code == 303 and "notice=added" in r.headers.get("Location", ""), r.status_code)
+    pg_shop = alice.server_ids().get("Shop PG")
+    r = alice.get(PORTAL + "/servers")
+    check("the list shows it as PostgreSQL, opened in pgAdmin", "PostgreSQL" in r.text and "Open in pgAdmin" in r.text)
+
+    page, cookie = alice.open_pg(pg_shop)
+    lc = cookie.lower()
+    check("open hands over to pgAdmin's host with a __Host-, Secure, HttpOnly cookie",
+          "__host-dbp_g" in lc and "secure" in lc and "httponly" in lc, cookie)
+    check("pgAdmin opens already signed in", page.status_code == 200 and "pgAdmin" in page.text,
+          f"{page.status_code} {page.headers.get('Location')} {page.text[:200]}")
+    check("pgAdmin sends HSTS", "max-age=" in page.headers.get("Strict-Transport-Security", ""))
+    check("pgAdmin's session cookie is __Host-", pga_cookie(alice) != "")
+    pga = PgAdmin(alice)
+    r = pga.load()
+    check("pgAdmin hands its page a CSRF token", pga.token != "", r.status_code)
+    gid = pga.group()
+    servers = pga.nodes(f"/browser/server/nodes/{gid}/") if gid else {}
+    check("the server opened in the portal is listed in a 'DB Portal' group", gid and "Shop PG" in servers, servers)
+    sid = servers.get("Shop PG")
+    code, j = pga.call("POST", f"/browser/server/connect/{gid}/{sid}", {})
+    check("pgAdmin connects without asking for the password", code == 200 and j.get("success") == 1, (code, j))
+    dbs = pga.databases(gid, sid)
+    check("pgAdmin lists the database", "shop" in dbs, dbs)
+    schemas = pga.nodes(f"/browser/schema/nodes/{gid}/{sid}/{dbs.get('shop')}/") if dbs.get("shop") else {}
+    tables = pga.nodes(f"/browser/table/nodes/{gid}/{sid}/{dbs.get('shop')}/{schemas.get('public')}/") if schemas.get("public") else {}
+    check("pgAdmin shows the database's tables", "products" in tables, (schemas, tables))
+    code, j = pga.call("POST", f"/sqleditor/initialize/sqleditor/{4242}/{gid}/{sid}/{dbs.get('shop')}",
+                       {"dbname": "shop", "user": "boss_admin", "password": "BossPg-2026!", "role": ""})
+    check("the Query Tool can't switch to another database user", "another database user" in json.dumps(j), (code, j))
+    code, j = pga.call("POST", f"/sqleditor/initialize/sqleditor/{4243}/{gid}/{sid}/{dbs.get('shop')}", {"dbname": "shop"})
+    check("the Query Tool opens as the portal's user", code == 200 and j.get("success") == 1, (code, j))
+    code, j = pga.call("POST", f"/browser/server/obj/{gid}/", {"name": "x", "host": "10.250.250.200", "port": 3306,
+                                                              "username": "legacy_admin", "db": "postgres"})
+    check("registering a server in pgAdmin is refused", code == 403 and "managed in DB Portal" in json.dumps(j), (code, j))
+    code, j = pga.call("PUT", f"/browser/server/obj/{gid}/{sid}", {"host": "internal-svc"})
+    check("changing a server's connection in pgAdmin is refused", code == 403, (code, j))
+    code, j = pga.call("DELETE", f"/browser/server/obj/{gid}/{sid}")
+    check("deleting a server in pgAdmin is refused", code == 403, (code, j))
+    code, j = pga.call("POST", "/misc/workspace/adhoc_connect_server", {"server_name": "x", "did": 0, "host": "pg-tls.test",
+                                                                        "port": 5432, "user": "app_user"})
+    check("ad hoc connections are refused", code == 403, (code, j))
+    code, j = pga.call("GET", "/llm/status")
+    check("pgAdmin reports its AI assistant as off", code == 200 and (j.get("data") or {}).get("system_enabled") is False, (code, j))
+    for path in ["/cloud/", "/import_export_servers/get_servers", "/llm/models/anthropic", "/user_management/user/"]:
+        code, j = pga.call("GET", path)
+        check(f"pgAdmin feature {path} is turned off", code == 403, (code, j))
+    r = alice.get(PGA + "/socket.io/?EIO=4&transport=polling")
+    check("Socket.IO (ERD, Schema Diff) works in the user's own session", r.status_code == 200, r.status_code)
+    alice.refresh_csrf()
+
+    print("\n== PostgreSQL: each account sees only its own pgAdmin")
+    bob.refresh_csrf()
+    r = bob.get(PGA + "/browser/")
+    check("bob has no pgAdmin access", r.status_code == 302, r.status_code)
+    bob_pg = server_data(kind="postgres", name="Bob PG", location="local", internal_host="pg-local", internal_port="5432",
+                         db_user="shop_owner", db_password="ShopPg-2026!", cred_mode="saved")
+    r = bob.form("/servers", bob_pg)
+    check("bob saves his own PostgreSQL server", r.status_code == 303, r.status_code)
+    page, _ = bob.open_pg(bob.server_ids().get("Bob PG"))
+    check("bob opens pgAdmin", page.status_code == 200, page.status_code)
+    # Same computer: bob's browser still holds alice's pgAdmin session cookie.
+    bob.session.cookies.set("__Host-pga_session", pga_cookie(alice), domain="pga.localhost", path="/")
+    bpga = PgAdmin(bob)
+    code, j = bpga.call("GET", "/browser/server_group/nodes/")
+    check("someone else's pgAdmin session is signed out, not reused", code in (401, 403), (code, j))
+    page = pga_home(bob)
+    check("pgAdmin then signs bob in as himself", page.status_code == 200, page.status_code)
+    bpga.load()
+    bgid = bpga.group()
+    bservers = bpga.nodes(f"/browser/server/nodes/{bgid}/") if bgid else {}
+    check("bob then sees only his own servers", "Bob PG" in bservers and "Shop PG" not in bservers, bservers)
+    code, j = bpga.call("POST", f"/browser/server/connect/{gid}/{sid}", {})
+    check("bob can't connect alice's server", code != 200 or j.get("success") != 1, (code, j))
+    # alice's own tab: pgAdmin checks again who she is and signs her back in.
+    pga_home(alice)
+    pga.load()
+    check("alice keeps her own pgAdmin", "Shop PG" in pga.nodes(f"/browser/server/nodes/{pga.group()}/"))
+
+    print("\n== PostgreSQL remote: TLS (private CA), pinned certificates, SSH, unencrypted")
+    pgtls = server_data(kind="postgres", name="Analytics PG", environment="Production", method="tls", host="pg-tls.test",
+                        port="5432", db_user="app_user", db_password="AppPg-2026!", db_name="analytics", cred_mode="ask")
+    code, j = alice.test_server(pgtls)
+    check("without its CA the certificate is rejected", not j.get("ok") and "certificate" in (j.get("error") or "").lower(), j)
+    code, j = alice.test_server(pgtls, files={"ca_file": ("ca.pem", ca, "application/x-pem-file")})
+    check("with its CA the certificate is verified (TLS 1.3)", j.get("ok")
+          and any("TLS 1.3, certificate verified" in c for c in j.get("checks", [])), j)
+    r = alice.form("/servers", pgtls, files={"ca_file": ("ca.pem", ca, "application/x-pem-file")})
+    check("TLS PostgreSQL server saved", r.status_code == 303, r.status_code)
+    page, _ = alice.open_pg(alice.server_ids().get("Analytics PG"), {"db_user": "app_user", "db_password": "nope"})
+    check("a wrong typed password doesn't open pgAdmin", page.status_code == 422, page.status_code)
+    page, _ = alice.open_pg(alice.server_ids().get("Analytics PG"), {"db_user": "app_user", "db_password": "AppPg-2026!"})
+    check("the typed password opens pgAdmin", page.status_code == 200, page.status_code)
+
+    def pga_open_and_list(name, database):
+        pga.load()
+        g = pga.group()
+        s = pga.nodes(f"/browser/server/nodes/{g}/").get(name)
+        c, res = pga.call("POST", f"/browser/server/connect/{g}/{s}", {})
+        ok = c == 200 and res.get("success") == 1
+        return ok and database in pga.databases(g, s), (c, res)
+
+    ok, detail = pga_open_and_list("Analytics PG", "analytics")
+    check("pgAdmin connects with the verified certificate and lists the database", ok, detail)
+
+    pinned_pg = server_data(kind="postgres", name="Pinned PG", method="pinned", host="pg-pinned.test", port="5432",
+                            db_user="app_user", db_password="AppPg-2026!")
+    code, j = alice.test_server(pinned_pg)
+    pin = j.get("pin") or {}
+    check("a CA-signed certificate for another name is pinned by fingerprint", j.get("ok") and pin.get("strict") is False
+          and pin.get("token"), j)
+    r = alice.form("/servers", dict(pinned_pg, pin_token=pin.get("token", "")))
+    check("pinned PostgreSQL server saved", r.status_code == 303, r.status_code)
+    page, _ = alice.open_pg(alice.server_ids().get("Pinned PG"))
+    ok, detail = pga_open_and_list("Pinned PG", "pinned")
+    check("pgAdmin connects after checking the fingerprint", page.status_code == 200 and ok, detail)
+
+    self_pg = server_data(kind="postgres", name="Selfsigned PG", method="pinned", host="pg-selfsigned.test", port="5432",
+                          db_user="app_user", db_password="AppPg-2026!")
+    code, j = alice.test_server(self_pg)
+    pin = j.get("pin") or {}
+    check("a self-signed certificate is pinned strictly (by PostgreSQL's client)", j.get("ok") and pin.get("strict") is True, j)
+    r = alice.form("/servers", dict(self_pg, pin_token=pin.get("token", "")))
+    page, _ = alice.open_pg(alice.server_ids().get("Selfsigned PG"))
+    ok, detail = pga_open_and_list("Selfsigned PG", "legacy")
+    check("pgAdmin connects with the pinned certificate", page.status_code == 200 and ok, detail)
+
+    code, j = alice.test_server(server_data(kind="postgres", method="tls", host="pg-plain.test", port="5432",
+                                            db_user="app_user", db_password="AppPg-2026!"))
+    check("a PostgreSQL server without TLS is refused", not j.get("ok") and "doesn't offer TLS" in (j.get("error") or ""), j)
+    code, j = alice.test_server(server_data(kind="postgres", method="pinned", host="pg-plain.test", port="5432",
+                                            db_user="app_user", db_password="AppPg-2026!"))
+    check("…also when pinning", not j.get("ok") and "doesn't offer TLS" in (j.get("error") or ""), j)
+
+    ssh_pg = server_data(kind="postgres", name="Office PG", method="ssh", ssh_host="bastion.test", ssh_user="deploy",
+                         ssh_auth="key", ssh_key=key, ssh_db_host="private-pg", ssh_db_port="5432", db_user="app_user",
+                         db_password="AppPg-2026!", db_name="reports")
+    code, j = alice.test_server(ssh_pg)
+    pin = j.get("pin") or {}
+    check("PostgreSQL through the SSH tunnel passes", j.get("ok") and any("SSH connected" in c for c in j.get("checks", [])), j)
+    r = alice.form("/servers", dict(ssh_pg, pin_token=pin.get("token", "")))
+    check("SSH PostgreSQL server saved", r.status_code == 303, r.status_code)
+    page, _ = alice.open_pg(alice.server_ids().get("Office PG"))
+    ok, detail = pga_open_and_list("Office PG", "reports")
+    check("pgAdmin connects through the SSH tunnel", page.status_code == 200 and ok, detail)
+    alice.refresh_csrf()
+
     print("\n== This server's own address (EGRESS_IP=10.250.250.200) and blocked addresses")
     code, j = alice.test_server(dict(pinned, host="10.250.250.200"))
     check("a database on this server can be added as a remote server (its public IP)", j.get("ok"), j)
@@ -343,6 +599,12 @@ def main():
     except requests.RequestException as exc:
         status = str(exc)
     check("uploads over the import limit are refused before phpMyAdmin", status == 413, status)
+    try:
+        big = alice.post(f"{PGA}/file_manager/filemanager/1/", files={"newfile": ("big.sql", b"x" * (2 * 1024 * 1024))})
+        status = big.status_code
+    except requests.RequestException as exc:
+        status = str(exc)
+    check("uploads over the limit are refused before pgAdmin", status == 413, status)
     r = alice.form("/admin/limits", dict(LIMIT_DEFAULTS, signins_per_ip_minute="100"))
     check("limits saved", r.status_code == 303, r.status_code)
 
@@ -361,7 +623,7 @@ def main():
     print("\n== Activity log")
     r = alice.get(PORTAL + "/activity")
     check("alice's activity shows opens, changes and tests",
-          all(s in r.text for s in ["Opened phpMyAdmin", "Server added", "Connection tested"]), r.status_code)
+          all(s in r.text for s in ["Opened phpMyAdmin", "Opened pgAdmin", "Server added", "Connection tested"]), r.status_code)
     r = bob.get(PORTAL + "/activity?filter=problems")
     check("bob's activity shows his lockout", "Server locked" in r.text, r.status_code)
     check("bob's activity doesn't show alice's servers", "Shop – Production" not in r.text)
@@ -370,6 +632,14 @@ def main():
     r = alice.get(f"{PMA}/__dbportal/close?slot={slot}")
     check("phpMyAdmin 'Log out' closes that session and returns to the portal",
           r.status_code == 303 and r.headers.get("Location", "").startswith(PORTAL + "/servers"), r.status_code)
+    r = alice.get(PGA + "/logout", headers={"Accept": "text/html"})
+    check("pgAdmin 'Log out' goes to the portal's close page", r.status_code == 303
+          and r.headers.get("Location", "") == PGA + "/__dbportal/close", f"{r.status_code} {r.headers.get('Location')}")
+    r = alice.get(r.headers.get("Location", PGA + "/__dbportal/close"))
+    check("…which closes this browser's pgAdmin sessions", r.status_code == 303
+          and "notice=pga-closed" in r.headers.get("Location", ""), f"{r.status_code} {r.headers.get('Location')}")
+    r = alice.get(PGA + "/browser/")
+    check("pgAdmin needs a newly opened server after that", r.status_code == 302, r.status_code)
     alice.refresh_csrf()
     r = alice.form("/auth/logout", {})
     check("sign out", r.status_code == 303 and "/signin" in r.headers.get("Location", ""), r.status_code)

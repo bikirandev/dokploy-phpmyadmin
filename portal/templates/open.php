@@ -4,6 +4,7 @@
 /** @var string $error */
 /** @var string $user */
 $saved = $server['cred_mode'] === 'saved';
+$tool = $server['kind'] === 'postgres' ? 'pgAdmin' : 'phpMyAdmin';
 $ctx->title = 'Open ' . $server['name'];
 $connection = match ($server['method']) {
     'internal' => 'Internal network',
@@ -21,7 +22,7 @@ $connection = match ($server['method']) {
   <div class="stack-6">
     <h1 id="open-title"><?= $saved ? 'Open' : 'Sign in to' ?> <?= e($server['name']) ?></h1>
     <p class="muted"><?= $saved
-        ? 'phpMyAdmin signs in with the password saved in the vault.'
+        ? $tool . ' signs in with the password saved in the vault.'
         : 'This server asks for its password every time. It is used for this session only and never stored.' ?></p>
     <span class="mono small muted wrap"><?= e($server['host']) ?>:<?= (int) $server['port'] ?> · <?= e($connection) ?></span>
   </div>
@@ -42,7 +43,7 @@ $connection = match ($server['method']) {
     <?php endif; ?>
     <div class="row-end">
       <a class="btn btn-secondary" href="/servers">Cancel</a>
-      <button class="btn btn-primary" type="submit">Open phpMyAdmin <?= icon('open') ?></button>
+      <button class="btn btn-primary" type="submit">Open <?= e($tool) ?> <?= icon('open') ?></button>
     </div>
   </form>
 </section>

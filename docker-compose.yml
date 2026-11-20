@@ -1,12 +1,13 @@
-# DB Portal: secure, multi-user phpMyAdmin for Dokploy.
+# DB Portal: secure, multi-user phpMyAdmin and pgAdmin for Dokploy.
 # Deploy as a Dokploy "Docker Compose" service from this repository. See README.md.
 #
 #   Internet ─▶ Traefik (Dokploy) ─▶ gateway ─▶ portal         (sign-in, servers, vault)
-#                                           └─▶ phpMyAdmin     (behind egress-guard's firewall)
+#                                           ├─▶ phpMyAdmin     (behind egress-guard's firewall)
+#                                           └─▶ pgAdmin        (behind pga-guard's firewall)
 #
 # In Dokploy, leave this service's "Domains" tab and "Advanced > Networks" empty, and Isolated
-# Deployment off: routing and networks are defined below. (phpMyAdmin uses egress-guard's network,
-# so any network Dokploy adds to "pma" fails the deploy.)
+# Deployment off: routing and networks are defined below. (phpMyAdmin and pgAdmin use their
+# guards' networks, so any network Dokploy adds to "pma" or "pga" fails the deploy.)
 
 x-hardening: &hardening
   restart: unless-stopped
@@ -27,13 +28,16 @@ services:
       GATEWAY_TOKEN: ${GATEWAY_TOKEN:?Set GATEWAY_TOKEN}
       PORTAL_HOST: ${PORTAL_DOMAIN:?Set PORTAL_DOMAIN}
       PMA_HOST: ${PMA_DOMAIN:?Set PMA_DOMAIN}
+      PGA_HOST: ${PGA_DOMAIN:?Set PGA_DOMAIN}
       PORTAL_PUBLIC_URL: ${PORTAL_PUBLIC_URL:-https://${PORTAL_DOMAIN}}
       CLOUDFLARE_ONLY: ${CLOUDFLARE_ONLY:-false}
-      NGINX_ENVSUBST_FILTER: ^(GATEWAY_TOKEN|PORTAL_HOST|PMA_HOST|PORTAL_PUBLIC_URL)$$
+      NGINX_ENVSUBST_FILTER: ^(GATEWAY_TOKEN|PORTAL_HOST|PMA_HOST|PGA_HOST|PORTAL_PUBLIC_URL)$$
     depends_on:
       portal:
         condition: service_healthy
       pma:
+        condition: service_started
+      pga:
         condition: service_started
     networks:
       - dokploy-network
@@ -41,12 +45,12 @@ services:
     labels:
       - traefik.enable=true
       - traefik.docker.network=dokploy-network
-      - traefik.http.routers.${APP_NAME:-dbportal}-http.rule=Host(`${PORTAL_DOMAIN}`) || Host(`${PMA_DOMAIN}`)
+      - traefik.http.routers.${APP_NAME:-dbportal}-http.rule=Host(`${PORTAL_DOMAIN}`) || Host(`${PMA_DOMAIN}`) || Host(`${PGA_DOMAIN}`)
       - traefik.http.routers.${APP_NAME:-dbportal}-http.entrypoints=web
       - traefik.http.routers.${APP_NAME:-dbportal}-http.middlewares=${APP_NAME:-dbportal}-https
       - traefik.http.middlewares.${APP_NAME:-dbportal}-https.redirectscheme.scheme=https
       - traefik.http.middlewares.${APP_NAME:-dbportal}-https.redirectscheme.permanent=true
-      - traefik.http.routers.${APP_NAME:-dbportal}.rule=Host(`${PORTAL_DOMAIN}`) || Host(`${PMA_DOMAIN}`)
+      - traefik.http.routers.${APP_NAME:-dbportal}.rule=Host(`${PORTAL_DOMAIN}`) || Host(`${PMA_DOMAIN}`) || Host(`${PGA_DOMAIN}`)
       - traefik.http.routers.${APP_NAME:-dbportal}.entrypoints=websecure
       - traefik.http.routers.${APP_NAME:-dbportal}.tls.certresolver=${CERT_RESOLVER:-letsencrypt}
       - traefik.http.services.${APP_NAME:-dbportal}.loadbalancer.server.port=8080
@@ -69,6 +73,7 @@ services:
     environment:
       PUBLIC_URL: ${PORTAL_PUBLIC_URL:-https://${PORTAL_DOMAIN}}
       PMA_PUBLIC_URL: ${PMA_PUBLIC_URL:-https://${PMA_DOMAIN}}
+      PGA_PUBLIC_URL: ${PGA_PUBLIC_URL:-https://${PGA_DOMAIN}}
       PORTAL_NAME: ${PORTAL_NAME:-DB Portal}
       OIDC_PROVIDER_NAME: ${OIDC_PROVIDER_NAME:-Bikiran}
       OIDC_ISSUER: ${OIDC_ISSUER:?Set OIDC_ISSUER}
@@ -85,10 +90,12 @@ services:
       VAULT_KEY: ${VAULT_KEY:?Set VAULT_KEY}
       GATEWAY_TOKEN: ${GATEWAY_TOKEN:?Set GATEWAY_TOKEN}
       PMA_TOKEN: ${PMA_TOKEN:?Set PMA_TOKEN}
+      PGA_TOKEN: ${PGA_TOKEN:?Set PGA_TOKEN}
       ADMIN_SUBJECTS: ${ADMIN_SUBJECTS:-}
       EGRESS_IP: ${EGRESS_IP:-}
       EGRESS_ALLOW_CIDRS: ${EGRESS_ALLOW_CIDRS:-}
       PMA_INTERNAL_URL: http://pma:8081
+      PGA_INTERNAL_URL: http://pga:8081
     networks:
       - backend
       - portal-egress
@@ -166,8 +173,78 @@ services:
           cpus: "1.5"
           memory: 768M
 
+  # Firewall for pgAdmin's network (pgAdmin shares this container's network namespace).
+  # Same image and rules as egress-guard, on its own egress network.
+  pga-guard:
+    build: ./egress-guard
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /run
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_ADMIN
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      PORTAL_HOST: portal
+      EGRESS_ALLOW_CIDRS: ${EGRESS_ALLOW_CIDRS:-}
+      EGRESS_BLOCK_CIDRS: ${EGRESS_BLOCK_CIDRS:-}
+    depends_on:
+      portal:
+        condition: service_started
+    networks:
+      backend:
+        aliases:
+          - pga
+      pma-databases: {}
+      pga-egress:
+        gw_priority: 100
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 32M
+
+  pga:
+    <<: *hardening
+    build: ./pgadmin
+    init: true
+    network_mode: service:pga-guard
+    depends_on:
+      pga-guard:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run/pgadmin:uid=5050,gid=0,mode=0700
+      - /run/dbportal:uid=5050,gid=0,mode=0700
+    volumes:
+      - pga-data:/var/lib/pgadmin
+    environment:
+      PGA_PUBLIC_URL: ${PGA_PUBLIC_URL:-https://${PGA_DOMAIN}}
+      PORTAL_PUBLIC_URL: ${PORTAL_PUBLIC_URL:-https://${PORTAL_DOMAIN}}
+      PORTAL_INTERNAL_URL: http://portal:8080
+      PGA_TOKEN: ${PGA_TOKEN:?Set PGA_TOKEN}
+      EGRESS_ALLOW_CIDRS: ${EGRESS_ALLOW_CIDRS:-}
+      EGRESS_BLOCK_CIDRS: ${EGRESS_BLOCK_CIDRS:-}
+      TZ: UTC
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:8080/misc/ping"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 1G
+
 volumes:
   portal-data:
+  pga-data:
 
 networks:
   dokploy-network:
@@ -179,3 +256,4 @@ networks:
     internal: true
   portal-egress: {}
   pma-egress: {}
+  pga-egress: {}

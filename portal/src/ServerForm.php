@@ -29,6 +29,10 @@ final class ServerForm
             $environment = 'Production';
         }
 
+        $engine = $req->post('kind') === Servers::POSTGRES ? Servers::POSTGRES : Servers::MYSQL;
+        $isPg = $engine === Servers::POSTGRES;
+        $defaultPort = (string) Servers::defaultPort($engine);
+
         $location = $req->post('location') === 'local' ? 'local' : 'remote';
         $method = $location === 'local' ? 'internal' : $req->post('method', 'tls');
         if (!in_array($method, ['tls', 'pinned', 'ssh', 'internal'], true) || ($location === 'remote' && $method === 'internal')) {
@@ -39,13 +43,13 @@ final class ServerForm
         // Database endpoint. For SSH it is the address as seen from the SSH server.
         if ($method === 'ssh') {
             $host = trim($req->post('ssh_db_host')) ?: '127.0.0.1';
-            $portRaw = trim($req->post('ssh_db_port')) ?: '3306';
+            $portRaw = trim($req->post('ssh_db_port')) ?: $defaultPort;
         } elseif ($method === 'internal') {
             $host = trim($req->post('internal_host'));
-            $portRaw = trim($req->post('internal_port')) ?: '3306';
+            $portRaw = trim($req->post('internal_port')) ?: $defaultPort;
         } else {
             $host = trim($req->post('host'));
-            $portRaw = trim($req->post('port')) ?: '3306';
+            $portRaw = trim($req->post('port')) ?: $defaultPort;
         }
         $allow = $ctx->cfg->egressAllowCidrs;
         if ($method === 'internal') {
@@ -63,10 +67,13 @@ final class ServerForm
         } elseif (NetPolicy::isIp($host) && !NetPolicy::isPublicIp($host) && !NetPolicy::inCidrs($host, $allow)) {
             $errors['host'] = 'Use the server\'s public address, or connect through an SSH tunnel.';
         }
+        if ($isPg && !isset($errors['host']) && strlen($host) > 128) {
+            $errors['host'] = 'pgAdmin accepts host names of up to 128 characters.';
+        }
         $port = self::port($portRaw);
-        if ($port === null) {
-            $errors['port'] = 'Enter a port from 1 to 65535.';
-            $port = 3306;
+        if ($port === null || ($isPg && $port > 65534)) {
+            $errors['port'] = $isPg ? 'Enter a port from 1 to 65534.' : 'Enter a port from 1 to 65535.';
+            $port = (int) $defaultPort;
         }
 
         // SSH settings
@@ -120,10 +127,19 @@ final class ServerForm
 
         // Database login
         $dbUser = trim($req->post('db_user'));
-        if ($dbUser === '' || mb_strlen($dbUser) > 80) {
+        $blockedUser = Servers::blockedUser($engine);
+        if ($dbUser === '' || mb_strlen($dbUser) > 80 || ($isPg && strlen($dbUser) > 63)) {
             $errors['db_user'] = 'Enter the database user.';
-        } elseif (strcasecmp($dbUser, 'root') === 0) {
-            $errors['db_user'] = 'root is blocked. Use a user with only the privileges it needs.';
+        } elseif (strcasecmp($dbUser, $blockedUser) === 0) {
+            $errors['db_user'] = $isPg
+                ? 'postgres is blocked. Use a role with only the privileges it needs.'
+                : 'root is blocked. Use a user with only the privileges it needs.';
+        }
+
+        // PostgreSQL: the database to connect to first (empty means "postgres")
+        $dbName = $isPg ? trim($req->post('db_name')) : '';
+        if ($dbName !== '' && (strlen($dbName) > 63 || preg_match('/[\x00-\x1f\x7f]/', $dbName))) {
+            $errors['db_name'] = 'Enter a database name of up to 63 characters.';
         }
         $credMode = $req->post('cred_mode') === 'saved' ? 'saved' : 'ask';
         $dbPassword = $req->post('db_password');
@@ -187,11 +203,13 @@ final class ServerForm
         $data = [
             'name' => $name,
             'environment' => $environment,
+            'kind' => $engine,
             'location' => $location,
             'method' => $method,
             'host' => $host,
             'port' => $port,
             'db_user' => $dbUser,
+            'db_name' => $dbName,
             'cred_mode' => $credMode,
             'ca_pem' => $caPem,
             'ssh_host' => $sshHost,
@@ -222,6 +240,8 @@ final class ServerForm
         return [
             'name' => (string) $server['name'],
             'environment' => (string) $server['environment'],
+            'kind' => (string) $server['kind'],
+            'db_name' => (string) $server['db_name'],
             'location' => (string) $server['location'],
             'method' => $isInternal ? 'tls' : (string) $server['method'],
             'host' => !$isSsh && !$isInternal ? (string) $server['host'] : '',
@@ -242,8 +262,9 @@ final class ServerForm
     /** @return array<string, string> */
     public static function valuesFromRequest(Request $req): array
     {
-        $keys = ['name', 'environment', 'location', 'method', 'host', 'port', 'internal_host', 'internal_port',
-            'ssh_host', 'ssh_port', 'ssh_user', 'ssh_auth', 'ssh_db_host', 'ssh_db_port', 'db_user', 'cred_mode'];
+        $keys = ['name', 'environment', 'kind', 'db_name', 'location', 'method', 'host', 'port', 'internal_host',
+            'internal_port', 'ssh_host', 'ssh_port', 'ssh_user', 'ssh_auth', 'ssh_db_host', 'ssh_db_port', 'db_user',
+            'cred_mode'];
         $values = [];
         foreach ($keys as $key) {
             $values[$key] = $req->post($key);
