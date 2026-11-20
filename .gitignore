@@ -1,0 +1,16 @@
+# Local secrets
+.env
+.env.local
+
+# Dependencies (installed in the Docker build)
+portal/vendor/
+
+# Generated test certificates and keys
+test/.fixtures/
+
+# Editors and OS files
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

@@ -1,0 +1,193 @@
+# Local end-to-end test environment. NOT for production.
+# Imitates a Dokploy server: Traefik on dokploy-network, a stand-in identity provider,
+# databases on the pma-databases network, and "remote" databases (TLS, self-signed, SSH).
+# Run with: test/run-e2e.sh  (relative paths below are from the repository root)
+
+services:
+  traefik:
+    image: traefik:v3.7.19
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=dokploy-network
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --entrypoints.websecure.http.tls=true
+      - --certificatesresolvers.letsencrypt.acme.email=test@example.com
+      - --certificatesresolvers.letsencrypt.acme.storage=/tmp/acme.json
+      - --certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web
+      - --certificatesresolvers.letsencrypt.acme.caserver=https://127.0.0.1:1/directory
+      - --log.level=ERROR
+    ports:
+      - "8443:443"
+      - "8480:80"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - dokploy-network
+
+  mock-oidc:
+    image: ghcr.io/navikt/mock-oauth2-server:7.0.1
+    ports:
+      - "8090:8080"
+    environment:
+      LOG_LEVEL: WARN
+      JSON_CONFIG: >-
+        {"interactiveLogin": true,
+         "tokenCallbacks": [{"issuerId": "default", "requestMappings": [{"requestParam": "subject", "match": ".*",
+           "claims": {"sub": "$${subject}", "email": "$${subject}@example.com", "name": "$${subject}", "email_verified": true}}]}]}
+
+  portal:
+    extra_hosts:
+      - host.docker.internal:host-gateway
+
+  egress-guard:
+    networks:
+      test-remote: {}
+
+  # A Dokploy database "on this server" (on the pma-databases network)
+  local-db:
+    image: mariadb:11.4
+    environment:
+      MARIADB_ROOT_PASSWORD: RootPass-2026!
+    volumes:
+      - ./test/fixtures/local-db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - pma-databases
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      retries: 30
+
+  # Another customer's database on the same network
+  other-db:
+    image: mariadb:11.4
+    environment:
+      MARIADB_ROOT_PASSWORD: RootPass-2026!
+      MARIADB_DATABASE: crm
+      MARIADB_USER: crm_admin
+      MARIADB_PASSWORD: CrmPass-2026!
+    networks:
+      - pma-databases
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      retries: 30
+
+  # Remote, TLS with a certificate from a private CA (name: remote-tls.test)
+  remote-tls:
+    image: mariadb:11.4
+    environment:
+      MARIADB_ROOT_PASSWORD: RootPass-2026!
+      MARIADB_DATABASE: analytics
+      MARIADB_USER: report_ro
+      MARIADB_PASSWORD: ReportPass-2026!
+    volumes:
+      - ./test/.fixtures:/certs:ro
+      - ./test/fixtures/mariadb-remote-tls.cnf:/etc/mysql/conf.d/zz-tls.cnf:ro
+    networks:
+      test-remote:
+        aliases:
+          - remote-tls.test
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      retries: 30
+
+  # Remote, MySQL with its auto-generated self-signed certificate (pinned, checked before connecting)
+  remote-selfsigned:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: RootPass-2026!
+      MYSQL_DATABASE: legacy
+      MYSQL_USER: legacy_admin
+      MYSQL_PASSWORD: LegacyPass-2026!
+    networks:
+      test-remote:
+        aliases:
+          - selfsigned.test
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-pRootPass-2026!"]
+      interval: 5s
+      retries: 40
+
+  # Remote, self-signed certificate whose name matches the host (strict pinning)
+  remote-strict:
+    image: mariadb:11.4
+    environment:
+      MARIADB_ROOT_PASSWORD: RootPass-2026!
+      MARIADB_DATABASE: strictdb
+      MARIADB_USER: strict_user
+      MARIADB_PASSWORD: StrictPass-2026!
+    volumes:
+      - ./test/.fixtures:/certs:ro
+      - ./test/fixtures/mariadb-strict.cnf:/etc/mysql/conf.d/zz-tls.cnf:ro
+    networks:
+      test-remote:
+        aliases:
+          - strict.test
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      retries: 30
+
+  # SSH bastion in front of a private database
+  ssh-bastion:
+    build: ./test/ssh-bastion
+    volumes:
+      - ./test/.fixtures/deploy_ed25519.pub:/fixtures/authorized_key.pub:ro
+    networks:
+      test-remote:
+        aliases:
+          - bastion.test
+      ssh-private: {}
+
+  ssh-db:
+    image: mariadb:11.4
+    environment:
+      MARIADB_ROOT_PASSWORD: RootPass-2026!
+      MARIADB_DATABASE: reports
+      MARIADB_USER: reports_dev
+      MARIADB_PASSWORD: ReportsDev-2026!
+    networks:
+      ssh-private:
+        aliases:
+          - private-db
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      retries: 30
+
+  # Stands for Dokploy's own services: phpMyAdmin must never reach it.
+  internal-svc:
+    image: traefik/whoami:latest
+    networks:
+      - dokploy-network
+
+  tester:
+    image: python:3.12-alpine
+    profiles: ["test"]
+    working_dir: /e2e
+    volumes:
+      - ./test/e2e:/e2e:ro
+      - ./test/.fixtures:/fixtures:ro
+    environment:
+      PORTAL: https://db.localhost:8443
+      PMA: https://pma.localhost:8443
+      PYTHONUNBUFFERED: "1"
+    extra_hosts:
+      - db.localhost:host-gateway
+      - pma.localhost:host-gateway
+      - host.docker.internal:host-gateway
+    command: ["sh", "-c", "pip install -q --disable-pip-version-check requests >/dev/null 2>&1 && python test_e2e.py"]
+    networks:
+      - tester
+
+networks:
+  test-remote:
+    ipam:
+      config:
+        - subnet: 10.250.250.0/24
+  ssh-private:
+    internal: true
+  tester: {}

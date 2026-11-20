@@ -1,0 +1,178 @@
+# DB Portal: secure, multi-user phpMyAdmin for Dokploy.
+# Deploy as a Dokploy "Docker Compose" service from this repository. See README.md.
+#
+#   Internet ─▶ Traefik (Dokploy) ─▶ gateway ─▶ portal         (sign-in, servers, vault)
+#                                           └─▶ phpMyAdmin     (behind egress-guard's firewall)
+#
+# Do not add a domain in Dokploy's "Domains" tab: routing is defined by the labels below.
+
+x-hardening: &hardening
+  restart: unless-stopped
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+
+services:
+  gateway:
+    <<: *hardening
+    build: ./gateway
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /etc/nginx/conf.d:uid=101,gid=101,mode=0755
+    environment:
+      GATEWAY_TOKEN: ${GATEWAY_TOKEN:?Set GATEWAY_TOKEN}
+      PORTAL_HOST: ${PORTAL_DOMAIN:?Set PORTAL_DOMAIN}
+      PMA_HOST: ${PMA_DOMAIN:?Set PMA_DOMAIN}
+      PORTAL_PUBLIC_URL: ${PORTAL_PUBLIC_URL:-https://${PORTAL_DOMAIN}}
+      CLOUDFLARE_ONLY: ${CLOUDFLARE_ONLY:-false}
+      NGINX_ENVSUBST_FILTER: ^(GATEWAY_TOKEN|PORTAL_HOST|PMA_HOST|PORTAL_PUBLIC_URL)$$
+    depends_on:
+      portal:
+        condition: service_healthy
+      pma:
+        condition: service_started
+    networks:
+      - dokploy-network
+      - backend
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=dokploy-network
+      - traefik.http.routers.${APP_NAME:-dbportal}-http.rule=Host(`${PORTAL_DOMAIN}`) || Host(`${PMA_DOMAIN}`)
+      - traefik.http.routers.${APP_NAME:-dbportal}-http.entrypoints=web
+      - traefik.http.routers.${APP_NAME:-dbportal}-http.middlewares=${APP_NAME:-dbportal}-https
+      - traefik.http.middlewares.${APP_NAME:-dbportal}-https.redirectscheme.scheme=https
+      - traefik.http.middlewares.${APP_NAME:-dbportal}-https.redirectscheme.permanent=true
+      - traefik.http.routers.${APP_NAME:-dbportal}.rule=Host(`${PORTAL_DOMAIN}`) || Host(`${PMA_DOMAIN}`)
+      - traefik.http.routers.${APP_NAME:-dbportal}.entrypoints=websecure
+      - traefik.http.routers.${APP_NAME:-dbportal}.tls.certresolver=${CERT_RESOLVER:-letsencrypt}
+      - traefik.http.services.${APP_NAME:-dbportal}.loadbalancer.server.port=8080
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 128M
+
+  portal:
+    <<: *hardening
+    build: ./portal
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/run/apache2
+      - /var/lock/apache2
+    volumes:
+      - portal-data:/data
+    environment:
+      PUBLIC_URL: ${PORTAL_PUBLIC_URL:-https://${PORTAL_DOMAIN}}
+      PMA_PUBLIC_URL: ${PMA_PUBLIC_URL:-https://${PMA_DOMAIN}}
+      PORTAL_NAME: ${PORTAL_NAME:-DB Portal}
+      OIDC_PROVIDER_NAME: ${OIDC_PROVIDER_NAME:-Bikiran}
+      OIDC_ISSUER: ${OIDC_ISSUER:?Set OIDC_ISSUER}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:?Set OIDC_CLIENT_ID}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      OIDC_SCOPES: ${OIDC_SCOPES:-openid email profile}
+      OIDC_TOKEN_AUTH: ${OIDC_TOKEN_AUTH:-basic}
+      OIDC_USER_ID_CLAIM: ${OIDC_USER_ID_CLAIM:-sub}
+      OIDC_EMAIL_CLAIM: ${OIDC_EMAIL_CLAIM:-email}
+      OIDC_NAME_CLAIM: ${OIDC_NAME_CLAIM:-name}
+      OIDC_REQUIRED_AMR: ${OIDC_REQUIRED_AMR:-}
+      OIDC_REQUIRE_EMAIL_VERIFIED: ${OIDC_REQUIRE_EMAIL_VERIFIED:-false}
+      OIDC_ALLOW_HTTP: ${OIDC_ALLOW_HTTP:-false}
+      VAULT_KEY: ${VAULT_KEY:?Set VAULT_KEY}
+      GATEWAY_TOKEN: ${GATEWAY_TOKEN:?Set GATEWAY_TOKEN}
+      PMA_TOKEN: ${PMA_TOKEN:?Set PMA_TOKEN}
+      ADMIN_SUBJECTS: ${ADMIN_SUBJECTS:-}
+      EGRESS_IP: ${EGRESS_IP:-}
+      EGRESS_ALLOW_CIDRS: ${EGRESS_ALLOW_CIDRS:-}
+      PMA_INTERNAL_URL: http://pma:8081
+    networks:
+      - backend
+      - portal-egress
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 256M
+
+  # Firewall for phpMyAdmin's network (phpMyAdmin shares this container's network namespace).
+  egress-guard:
+    build: ./egress-guard
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /run
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_ADMIN
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      PORTAL_HOST: portal
+      EGRESS_ALLOW_CIDRS: ${EGRESS_ALLOW_CIDRS:-}
+      EGRESS_BLOCK_CIDRS: ${EGRESS_BLOCK_CIDRS:-}
+    depends_on:
+      portal:
+        condition: service_started
+    networks:
+      backend:
+        aliases:
+          - pma
+      pma-databases: {}
+      pma-egress:
+        gw_priority: 100
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 32M
+
+  pma:
+    <<: *hardening
+    build: ./phpmyadmin
+    init: true
+    network_mode: service:egress-guard
+    depends_on:
+      egress-guard:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /sessions:uid=33,gid=33,mode=0700
+      - /var/www/html/tmp:uid=33,gid=33,mode=0700
+      - /var/run/apache2
+      - /var/lock/apache2
+      - /run/dbportal:uid=33,gid=33,mode=0700
+    environment:
+      PMA_PUBLIC_URL: ${PMA_PUBLIC_URL:-https://${PMA_DOMAIN}}
+      PORTAL_PUBLIC_URL: ${PORTAL_PUBLIC_URL:-https://${PORTAL_DOMAIN}}
+      PORTAL_INTERNAL_URL: http://portal:8080
+      PMA_TOKEN: ${PMA_TOKEN:?Set PMA_TOKEN}
+      EGRESS_ALLOW_CIDRS: ${EGRESS_ALLOW_CIDRS:-}
+      TZ: UTC
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8080/favicon.ico"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 768M
+
+volumes:
+  portal-data:
+
+networks:
+  dokploy-network:
+    external: true
+  pma-databases:
+    external: true
+    name: ${PMA_DATABASES_NETWORK:-pma-databases}
+  backend:
+    internal: true
+  portal-egress: {}
+  pma-egress: {}

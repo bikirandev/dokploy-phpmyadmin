@@ -1,0 +1,165 @@
+# Generated at start-up from environment variables (see 40-dbportal.sh and NGINX_ENVSUBST_FILTER).
+
+# The real client address. Traefik (Dokploy) is the only direct peer; it sets X-Forwarded-For.
+set_real_ip_from 10.0.0.0/8;
+set_real_ip_from 172.16.0.0/12;
+set_real_ip_from 192.168.0.0/16;
+set_real_ip_from fc00::/7;
+real_ip_header X-Forwarded-For;
+real_ip_recursive on;
+
+# $client_ip: the visitor (or, behind Cloudflare, CF-Connecting-IP).
+include /etc/nginx/conf.d/client-ip.inc;
+
+# Per-IP rate limits (the portal adds per-account limits on top).
+limit_req_zone $client_ip zone=perip:20m rate=30r/s;
+limit_req_zone $client_ip zone=signin:10m rate=30r/m;
+limit_conn_zone $client_ip zone=conn:10m;
+limit_req_status 429;
+limit_conn_status 429;
+
+upstream portal_up {
+    server portal:8080;
+    keepalive 16;
+}
+
+upstream pma_up {
+    server pma:8080;
+    keepalive 16;
+}
+
+# Unknown host names get nothing.
+server {
+    listen 8080 default_server;
+    server_name _;
+
+    location = /healthz {
+        access_log off;
+        default_type text/plain;
+        return 200 "ok\n";
+    }
+
+    location / {
+        return 404;
+    }
+}
+
+# The portal
+server {
+    listen 8080;
+    server_name ${PORTAL_HOST};
+
+    include /etc/nginx/conf.d/cloudflare-allow.inc;
+
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "same-origin" always;
+    add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=()" always;
+    add_header Cross-Origin-Opener-Policy "same-origin" always;
+    add_header Cross-Origin-Resource-Policy "same-origin" always;
+    add_header X-Robots-Tag "noindex, nofollow" always;
+
+    limit_req zone=perip burst=120 nodelay;
+    limit_conn conn 50;
+
+    # Internal endpoints are never reachable from outside.
+    location ^~ /internal/ {
+        return 404;
+    }
+
+    location ^~ /__dbportal/ {
+        return 404;
+    }
+
+    location ^~ /auth/ {
+        limit_req zone=signin burst=20 nodelay;
+        include /etc/nginx/proxy-base.inc;
+        proxy_set_header X-DBP-Host "";
+        proxy_set_header X-DBP-Assertion "";
+        proxy_set_header X-Internal-Token "";
+        proxy_hide_header X-Powered-By;
+        proxy_pass http://portal_up;
+    }
+
+    location / {
+        include /etc/nginx/proxy-base.inc;
+        proxy_set_header X-DBP-Host "";
+        proxy_set_header X-DBP-Assertion "";
+        proxy_set_header X-Internal-Token "";
+        proxy_hide_header X-Powered-By;
+        proxy_pass http://portal_up;
+    }
+}
+
+# phpMyAdmin, on its own host name. Every request is checked with the portal first.
+server {
+    listen 8080;
+    server_name ${PMA_HOST};
+
+    include /etc/nginx/conf.d/cloudflare-allow.inc;
+
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "no-referrer" always;
+    add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=()" always;
+    add_header Cross-Origin-Opener-Policy "same-origin" always;
+    add_header X-Robots-Tag "noindex, nofollow" always;
+
+    limit_req zone=perip burst=200 nodelay;
+    limit_conn conn 60;
+
+    # Asks the portal: does this request carry a live phpMyAdmin session?
+    location = /_dbp_auth {
+        internal;
+        proxy_http_version 1.1;
+        proxy_pass_request_body off;
+        proxy_set_header Connection "";
+        proxy_set_header Content-Length "";
+        proxy_set_header Cookie $http_cookie;
+        proxy_set_header X-Real-IP $client_ip;
+        proxy_set_header X-Original-Method $request_method;
+        proxy_set_header X-Original-Length $content_length;
+        proxy_set_header X-Internal-Token "${GATEWAY_TOKEN}";
+        proxy_set_header X-DBP-Host "";
+        proxy_set_header X-DBP-Assertion "";
+        proxy_pass http://portal_up/internal/pma-auth;
+    }
+
+    # Hand-over and sign-out of phpMyAdmin sessions (served by the portal on this host name).
+    location ^~ /__dbportal/ {
+        limit_req zone=signin burst=20 nodelay;
+        include /etc/nginx/proxy-base.inc;
+        proxy_set_header X-DBP-Host pma;
+        proxy_set_header X-DBP-Assertion "";
+        proxy_set_header X-Internal-Token "";
+        proxy_hide_header X-Powered-By;
+        proxy_pass http://portal_up;
+    }
+
+    location / {
+        auth_request /_dbp_auth;
+        auth_request_set $dbp_assertion $upstream_http_x_dbp_assertion;
+        error_page 401 = @signin;
+        error_page 403 = @too_large;
+
+        include /etc/nginx/proxy-base.inc;
+        proxy_set_header X-DBP-Assertion $dbp_assertion;
+        proxy_set_header X-DBP-Host "";
+        proxy_set_header X-Internal-Token "";
+        proxy_hide_header X-Powered-By;
+        proxy_hide_header X-Content-Type-Options;
+        proxy_hide_header Referrer-Policy;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+        proxy_pass http://pma_up;
+    }
+
+    location @signin {
+        return 302 ${PORTAL_PUBLIC_URL}/servers?pma_signin=1;
+    }
+
+    location @too_large {
+        default_type text/plain;
+        return 413 "This file is larger than the import limit. Ask an admin to raise it.\n";
+    }
+}

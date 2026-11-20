@@ -1,0 +1,4 @@
+[mariadb]
+ssl_cert = /certs/strict.pem
+ssl_key = /certs/strict.key
+require_secure_transport = ON

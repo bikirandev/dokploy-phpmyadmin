@@ -1,0 +1,27 @@
+{
+    "name": "dbportal/portal",
+    "description": "Multi-user sign-in, server list and password vault in front of phpMyAdmin",
+    "type": "project",
+    "license": "MIT",
+    "require": {
+        "php": ">=8.3",
+        "ext-curl": "*",
+        "ext-json": "*",
+        "ext-openssl": "*",
+        "ext-pdo_sqlite": "*",
+        "ext-sodium": "*",
+        "firebase/php-jwt": "^7.2"
+    },
+    "autoload": {
+        "psr-4": {
+            "DbPortal\\": "src/"
+        },
+        "files": [
+            "src/helpers.php"
+        ]
+    },
+    "config": {
+        "optimize-autoloader": true,
+        "sort-packages": true
+    }
+}

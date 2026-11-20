@@ -1,0 +1,5 @@
+[mariadb]
+ssl_cert = /certs/remote-tls.pem
+ssl_key = /certs/remote-tls.key
+ssl_ca = /certs/ca.pem
+require_secure_transport = ON
