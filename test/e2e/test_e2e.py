@@ -377,7 +377,7 @@ def main():
           and "CRM – Staging" in r.text and "Shop – Production" in r.text and "information_schema" not in r.text, r.status_code)
     j = pma_json(alice.get(f"{PMA}/index.php?route=/database/structure&db=shop&ajax_request=true"))
     check("a click that names no server goes to none and says so", j.get("success") is False
-          and "doesn't say which server" in str(j.get("error")) and "products" not in json.dumps(j), j)
+          and "doesn't say which server" in html.unescape(str(j.get("error"))) and "products" not in json.dumps(j), j)
     r = alice.get(f"{PMA}/index.php?route=/database/structure&db=shop&server=1")
     check("an old-style number (a cookie slot) reaches no server", r.status_code == 409 and "Session ended" in r.text, r.status_code)
     token = html.unescape((re.search(r'name="token" value="([^"]+)"', home.text) or [None, ""])[1])

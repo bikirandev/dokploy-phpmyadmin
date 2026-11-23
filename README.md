@@ -170,6 +170,7 @@ Off by default. An admin turns it on under **Admin → Security → Allow unencr
 | Stolen or guessed portal password | There is none: sign-in is delegated to Bikiran (and its 2-step verification). |
 | Login CSRF, token replay, mix-up | Authorization code + PKCE, `state` bound to a cookie, `nonce`, issuer and audience checks, RFC 9207 `iss` check. |
 | One user reaching another's servers | Every query is scoped to the owner; tickets are bound to the user, their live session and the tool. pgAdmin checks on every request that its session belongs to the person the portal vouches for. |
+| A phpMyAdmin tab acting on another of your open servers | Each server keeps one number in phpMyAdmin (its portal id + 1000), written into every link and form, so each tab stays on its own server. A page whose server was closed, or that names none, reaches no database and says so. Logging out of one server leaves the others' tabs working. |
 | phpMyAdmin or pgAdmin bug (XSS) acting on the portal | Each tool runs on its own host name; portal cookies are `__Host-` and never sent there; strict CSP and CSRF tokens on the portal. |
 | Using phpMyAdmin or pgAdmin to attack internal systems | `egress-guard` and `pga-guard` firewalls: only the portal API, `pma-databases`, and public addresses. Address checks before every connection as well. In pgAdmin, adding servers, ad hoc connections, the PSQL terminal, cloud deployment and the AI assistant are turned off. |
 | pgAdmin keeping or reusing passwords | Every pgAdmin connection (Backup and Restore included) gets its password from the open ticket of that request: pgAdmin saves none, can't switch to another database user, and stops connecting within a minute after the portal session ends. |
@@ -204,7 +205,7 @@ Hardening: all containers run with `no-new-privileges`, all Linux capabilities d
 
 ## Testing locally
 
-`test/run-e2e.sh` builds everything and runs it next to a stand-in identity provider, Traefik (as Dokploy runs it), local and remote MySQL, MariaDB and PostgreSQL test databases (private CA, self-signed, SSH bastion), then runs about 230 browser-level and network checks. Needs Docker with Compose v2.33+.
+`test/run-e2e.sh` builds everything and runs it next to a stand-in identity provider, Traefik (as Dokploy runs it), local and remote MySQL, MariaDB and PostgreSQL test databases (private CA, self-signed, SSH bastion), then runs about 240 browser-level and network checks. Needs Docker with Compose v2.33+.
 
 ```sh
 test/run-e2e.sh            # run and clean up
