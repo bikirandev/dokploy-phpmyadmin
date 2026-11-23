@@ -18,6 +18,7 @@
     var paths = {
       check: 'M5 12.5l4.5 4.5L19 7.5',
       alert: 'M12 4l9 16H3l9-16zM12 10v4M12 17h.01',
+      info: 'M20.5 12a8.5 8.5 0 1 1-17 0 8.5 8.5 0 0 1 17 0zM12 11v5M12 8h.01',
       spin: 'M12 3a9 9 0 1 0 9 9'
     };
     var ns = 'http://www.w3.org/2000/svg';
@@ -186,11 +187,34 @@
       if (result.errors) { showFieldErrors(result.errors); }
       if (result.checks && result.checks.length) {
         var list = el('ul', { 'class': 'checks' });
-        result.checks.forEach(function (text) { list.appendChild(el('li', {}, [svgIcon('check'), el('span', { text: text })])); });
+        // A check is a line of text, or { text, warn } for one shown as a warning.
+        result.checks.forEach(function (check) {
+          var warn = typeof check === 'object' && check !== null && check.warn;
+          var text = typeof check === 'object' && check !== null ? check.text : check;
+          list.appendChild(el('li', warn ? { 'class': 'warn' } : {}, [svgIcon(warn ? 'alert' : 'check'), el('span', { text: text })]));
+        });
         if (result.superuser) {
           list.appendChild(el('li', { 'class': 'warn' }, [svgIcon('alert'), el('span', { text: 'This user has administrator-level privileges. Consider a more limited user.' })]));
         }
         nodes.push(list);
+      }
+      if (result.ok && result.tls_offered) {
+        // "Not encrypted" was tested, but the server does offer TLS.
+        var hint = el('div', { 'class': 'hint-box', role: 'note' }, [
+          el('span', { 'class': 'with-icon' }, [svgIcon('info'), el('span', {
+            text: 'This server offers TLS. Choose “TLS, self-signed certificate” to encrypt this connection and check the server’s identity.'
+          })])
+        ]);
+        var pinned = form.querySelector('input[name="method"][value="pinned"]');
+        if (pinned) {
+          var switchButton = el('button', { type: 'button', 'class': 'btn btn-small btn-outline', text: 'Switch to TLS, self-signed' });
+          switchButton.addEventListener('click', function () {
+            pinned.checked = true;
+            testButton.click();
+          });
+          hint.appendChild(switchButton);
+        }
+        nodes.push(hint);
       }
       if (result.pin) { nodes.push(renderPin(result.pin)); }
       if (result.grants && result.grants.length) {

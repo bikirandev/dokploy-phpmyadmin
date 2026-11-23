@@ -135,6 +135,12 @@ final class Tickets
         $this->db->run('DELETE FROM tickets WHERE server_id = ?', [$serverId]);
     }
 
+    /** Closes every open session of servers that use this connection method. Returns how many. */
+    public function revokeForMethod(string $method): int
+    {
+        return $this->db->run('DELETE FROM tickets WHERE server_id IN (SELECT id FROM servers WHERE method = ?)', [$method]);
+    }
+
     /**
      * The user behind a ticket cookie, if the ticket, its portal session and the user are all still valid.
      * Also keeps the portal session alive while the user works in phpMyAdmin or pgAdmin.
@@ -164,9 +170,10 @@ final class Tickets
      * Encrypted connection details for the tool, only for the asserting user's live tickets.
      *
      * @param array<int, string> $tickets base64url ticket ids by slot
+     * @param bool $allowPlain false when an admin turned off unencrypted connections
      * @return list<array{slot: int, c: string, n: string}>
      */
-    public function fetch(int $userId, array $tickets, string $app = 'pma'): array
+    public function fetch(int $userId, array $tickets, string $app = 'pma', bool $allowPlain = true): array
     {
         $now = time();
         $out = [];
@@ -176,8 +183,9 @@ final class Tickets
                 continue;
             }
             $row = $this->db->one(
-                'SELECT t.*, s.expires_at AS session_expires, s.last_seen_at AS session_seen
+                'SELECT t.*, s.expires_at AS session_expires, s.last_seen_at AS session_seen, sv.method AS server_method
                  FROM tickets t JOIN sessions s ON s.id_hash = t.session_hash
+                 JOIN servers sv ON sv.id = t.server_id
                  WHERE t.id_hash = ?',
                 [hash('sha256', $raw)],
             );
@@ -189,6 +197,7 @@ final class Tickets
                 || (int) $row['expires_at'] <= $now
                 || (int) $row['session_expires'] <= $now
                 || (int) $row['session_seen'] + Auth::IDLE_SECONDS <= $now
+                || (!$allowPlain && $row['server_method'] === 'plain')
             ) {
                 continue;
             }
@@ -210,15 +219,16 @@ final class Tickets
      *
      * @return list<string>
      */
-    public function openPgaRows(int $userId): array
+    public function openPgaRows(int $userId, bool $allowPlain = true): array
     {
         $now = time();
         $rows = $this->db->all(
             'SELECT DISTINCT sv.uid, t.db_user FROM tickets t
              JOIN sessions s ON s.id_hash = t.session_hash
              JOIN servers sv ON sv.id = t.server_id
-             WHERE t.user_id = ? AND t.app = \'pga\' AND t.expires_at > ? AND s.expires_at > ? AND s.last_seen_at > ?',
-            [$userId, $now, $now, $now - Auth::IDLE_SECONDS],
+             WHERE t.user_id = ? AND t.app = \'pga\' AND t.expires_at > ? AND s.expires_at > ? AND s.last_seen_at > ?
+               AND (? = 1 OR sv.method <> \'plain\')',
+            [$userId, $now, $now, $now - Auth::IDLE_SECONDS, $allowPlain ? 1 : 0],
         );
 
         return array_values(array_unique(array_map(
@@ -233,7 +243,7 @@ final class Tickets
      * @param list<string> $idHashes
      * @return list<string>
      */
-    public function alive(array $idHashes, string $app): array
+    public function alive(array $idHashes, string $app, bool $allowPlain = true): array
     {
         if ($idHashes === []) {
             return [];
@@ -244,9 +254,10 @@ final class Tickets
             "SELECT t.id_hash FROM tickets t
              JOIN sessions s ON s.id_hash = t.session_hash
              JOIN users u ON u.id = t.user_id
+             JOIN servers sv ON sv.id = t.server_id
              WHERE t.id_hash IN ($marks) AND t.app = ? AND t.expires_at > ? AND s.expires_at > ? AND s.last_seen_at > ?
-               AND u.suspended_at IS NULL",
-            [...$idHashes, $app, $now, $now, $now - Auth::IDLE_SECONDS],
+               AND u.suspended_at IS NULL AND (? = 1 OR sv.method <> 'plain')",
+            [...$idHashes, $app, $now, $now, $now - Auth::IDLE_SECONDS, $allowPlain ? 1 : 0],
         );
 
         return array_map(static fn (array $r): string => (string) $r['id_hash'], $rows);

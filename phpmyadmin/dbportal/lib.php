@@ -276,6 +276,31 @@ final class Net
  */
 final class Probe
 {
+    /** The server capability flag that says it offers TLS. */
+    private const CLIENT_SSL = 0x0800;
+
+    /**
+     * Whether the server offers TLS, from its greeting alone (no login). Null when that can't be told.
+     */
+    public static function offersTls(string $host, int $port): ?bool
+    {
+        $target = filter_var($host, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) !== false ? "[$host]" : $host;
+        $fp = @stream_socket_client("tcp://$target:$port", $errno, $errstr, 5);
+        if ($fp === false) {
+            return null;
+        }
+        try {
+            stream_set_timeout($fp, 5);
+            [, $capabilities] = self::greeting($fp, $host, $port);
+
+            return ($capabilities & self::CLIENT_SSL) !== 0;
+        } catch (Throwable) {
+            return null;
+        } finally {
+            fclose($fp);
+        }
+    }
+
     /** @return array{pem: string, sha256: string, strict: bool, tls: string} */
     public static function certificate(string $host, int $port): array
     {
@@ -294,23 +319,8 @@ final class Probe
         }
         try {
             stream_set_timeout($fp, 8);
-            $header = self::read($fp, 4);
-            $length = ord($header[0]) | (ord($header[1]) << 8) | (ord($header[2]) << 16);
-            $sequence = ord($header[3]);
-            $payload = self::read($fp, $length);
-            if ($payload === '' || $payload[0] === "\xff") {
-                throw new UserError("$host:$port refused the connection. It may block this portal's IP address.");
-            }
-            if (ord($payload[0]) !== 10) {
-                throw new UserError("$host:$port doesn't answer like MySQL or MariaDB.");
-            }
-            $pos = strpos($payload, "\0", 1);
-            if ($pos === false) {
-                throw new UserError("$host:$port sent an unexpected greeting.");
-            }
-            $pos += 1 + 4 + 8 + 1; // connection id, auth data part 1, filler
-            $capabilities = ord($payload[$pos] ?? "\0") | (ord($payload[$pos + 1] ?? "\0") << 8);
-            if (($capabilities & 0x0800) === 0) {
+            [$sequence, $capabilities] = self::greeting($fp, $host, $port);
+            if (($capabilities & self::CLIENT_SSL) === 0) {
                 throw new UserError("$host:$port doesn't offer TLS. Turn on TLS on the database server, or use an SSH tunnel.");
             }
             // SSLRequest: client flags, max packet size, charset (utf8mb4), 23 zero bytes
@@ -396,6 +406,34 @@ final class Probe
         }
 
         return false;
+    }
+
+    /**
+     * Reads the server's greeting. Returns its packet sequence number and lower capability flags.
+     *
+     * @param resource $fp
+     * @return array{0: int, 1: int}
+     */
+    private static function greeting($fp, string $host, int $port): array
+    {
+        $header = self::read($fp, 4);
+        $length = ord($header[0]) | (ord($header[1]) << 8) | (ord($header[2]) << 16);
+        $sequence = ord($header[3]);
+        $payload = self::read($fp, $length);
+        if ($payload === '' || $payload[0] === "\xff") {
+            throw new UserError("$host:$port refused the connection. It may block this portal's IP address.");
+        }
+        if (ord($payload[0]) !== 10) {
+            throw new UserError("$host:$port doesn't answer like MySQL or MariaDB.");
+        }
+        $pos = strpos($payload, "\0", 1);
+        if ($pos === false) {
+            throw new UserError("$host:$port sent an unexpected greeting.");
+        }
+        $pos += 1 + 4 + 8 + 1; // connection id, auth data part 1, filler
+        $capabilities = ord($payload[$pos] ?? "\0") | (ord($payload[$pos + 1] ?? "\0") << 8);
+
+        return [$sequence, $capabilities];
     }
 
     /** @param resource $fp */
@@ -628,6 +666,8 @@ final class Db
                 || $code === 2002 => "Can't reach $target. Check the address, the port and the firewall.",
             str_contains($message, "doesn't support SSL") || str_contains($message, 'SSL is required') =>
                 "$target doesn't offer TLS. Turn on TLS on the database server, or use an SSH tunnel.",
+            str_contains($message, 'insecure transport') || str_contains($message, 'requires secure connection') =>
+                "$target only accepts encrypted connections. Choose \"TLS, self-signed certificate\" instead.",
             $code === 1044 => 'Signed in, but this user has no access to any database.',
             default => 'Could not connect: ' . mb_substr(preg_replace('/\s+/', ' ', $message) ?? '', 0, 160),
         };
@@ -694,6 +734,10 @@ final class Tester
                     $transport = $pinned === '' ? 'self-signed certificate (trust it below)'
                         : ($strict ? 'pinned certificate verified' : 'certificate fingerprint matched');
                     break;
+                case 'plain':
+                    // "Not encrypted", allowed by an admin: no TLS at all.
+                    Net::checkRemote($host);
+                    break;
                 case 'ssh':
                     $ssh = is_array($d['ssh'] ?? null) ? $d['ssh'] : [];
                     $sshHost = (string) ($ssh['host'] ?? '');
@@ -742,7 +786,9 @@ final class Tester
                 array_unshift($out['checks'], "Reached the server in {$out['latency_ms']} ms");
             }
             $out['checks'][] = $method === 'ssh' ? $out['version'] . ', ' . $transport : $out['version'];
-            if ($method !== 'ssh') {
+            if ($method === 'plain') {
+                $out['checks'][] = ['text' => 'Not encrypted. Queries and results travel in clear text.', 'warn' => true];
+            } elseif ($method !== 'ssh') {
                 $out['checks'][] = ucfirst($transport);
             }
             if ($full) {
@@ -755,6 +801,10 @@ final class Tester
                 }
             }
             $mysqli->close();
+            if ($full && $method === 'plain' && Probe::offersTls($host, $port) === true) {
+                // The owner could encrypt this connection: the portal suggests it.
+                $out['tls_offered'] = true;
+            }
             $out['ok'] = true;
         } catch (AuthFailed) {
             $out['auth_failed'] = true;
@@ -828,6 +878,12 @@ final class Servers
                     $server['ssl'] = true;
                     $server['ssl_verify'] = $strict;
                     $server['ssl_ca'] = $strict ? Files::ca((string) ($d['pin_pem'] ?? '')) : '';
+                    break;
+                case 'plain':
+                    // "Not encrypted": the portal hands these out only while an admin allows them.
+                    if ($current) {
+                        Net::checkRemote($host);
+                    }
                     break;
                 case 'ssh':
                     $server['host'] = '127.0.0.1';

@@ -6,7 +6,7 @@ A secure, multi-user front door for **phpMyAdmin** and **pgAdmin**, deployed on 
 - **MySQL / MariaDB servers open in phpMyAdmin, PostgreSQL servers in pgAdmin.** Same server list, vault and rules for both.
 - **Each account sees only its own servers.** Add databases on this server or anywhere else.
 - **Saved passwords are encrypted** (XChaCha20-Poly1305) and never sent to the browser, or choose **Ask every time**.
-- **Remote servers over TLS, a pinned self-signed certificate, or an SSH tunnel.** Unencrypted connections are refused.
+- **Remote servers over TLS, a pinned self-signed certificate, or an SSH tunnel.** Unencrypted connections are refused, unless an admin turns on **Not encrypted** for servers that can't do better.
 - **phpMyAdmin and pgAdmin are each locked in a box**: each runs on its own host name, holds no secrets, and a firewall stops it reaching anything private (Dokploy itself, other apps, cloud metadata, your LAN).
 - **Abuse limits, lockouts, suspension and an activity log**, managed from an Admin page.
 
@@ -66,7 +66,7 @@ Then, for each database that should be reachable "on this server", open the data
 
 Attach it to the databases only, not to DB Portal's own services: `docker-compose.yml` already connects phpMyAdmin and pgAdmin to it.
 
-A database on this server can also be added as a "Remote server", through the server's public IP and the database's external port. "On this server" is safer: nothing is exposed to the internet. PostgreSQL databases created by Dokploy have TLS turned off, so for them "Remote server" only works after you turn TLS on (or through an SSH tunnel).
+A database on this server can also be added as a "Remote server", through the server's public IP and the database's external port. "On this server" is safer: nothing is exposed to the internet. PostgreSQL databases created by Dokploy have TLS turned off: see [Remote servers](#remote-servers) to turn it on.
 
 ### 3. Register the portal with Bikiran
 
@@ -126,7 +126,42 @@ Copy your user ID into `ADMIN_SUBJECTS` (comma-separated for several people) and
 | `PMA_DATABASES_NETWORK` | no | Name of the databases network (default `pma-databases`) |
 | `CERT_RESOLVER` | no | Traefik certificate resolver (default `letsencrypt`, Dokploy's default) |
 
-Abuse limits (servers per account, tests per minute, lockouts, sessions, import size, sign-in attempts per IP) are **not** environment variables: admins change them on the **Admin** page, and they are stored in the portal's own database.
+Abuse limits (servers per account, tests per minute, lockouts, sessions, import size, sign-in attempts per IP) and the **Allow unencrypted connections** switch are **not** environment variables: admins change them on the **Admin** page, and they are stored in the portal's own database.
+
+## Remote servers
+
+A remote server is reached in one of these ways, chosen when it's added:
+
+| Choice | When to use it |
+|---|---|
+| TLS, verified certificate | The server has a certificate from a public authority or your cloud provider (upload its CA if it's private). |
+| TLS, self-signed certificate | The server has its own certificate. The first test shows its fingerprint; you trust it once, and connections stop if it ever changes. |
+| SSH tunnel | The database isn't open to the internet, or has no TLS. |
+| Not encrypted | Only when an admin allows it, for servers that can't do any of the above yet. |
+
+### Turning on TLS for a Dokploy PostgreSQL
+
+PostgreSQL databases created by Dokploy (the official `postgres` image) have TLS turned off. Open a shell in the database's container (Dokploy's terminal for the database, or `docker exec -it <container> sh` on its server) and run:
+
+```sh
+cd "$PGDATA"
+openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj "/CN=postgres" -keyout server.key -out server.crt
+chown postgres:postgres server.key server.crt
+chmod 600 server.key
+psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "ALTER SYSTEM SET ssl = on" -c "SELECT pg_reload_conf()"
+```
+
+No restart is needed. The certificate and the setting are kept in the data volume, so they survive restarts. Add the server with **TLS, self-signed certificate**, and before trusting the fingerprint the test shows, compare it with `openssl x509 -in "$PGDATA/server.crt" -noout -fingerprint -sha256`. Don't use the `ssl-cert-snakeoil` certificate that comes with the image: every copy of the image has the same private key.
+
+### Not encrypted
+
+Off by default. An admin turns it on under **Admin → Security → Allow unencrypted connections to remote servers**. Then a fourth choice, **Not encrypted**, appears for remote servers:
+
+- The owner must tick "I understand that this connection isn't encrypted" to save such a server. The server list, the open page and the connection test mark it **Not encrypted**, and the test points out when the server does offer TLS.
+- Anyone on the network between this server and the database can read every query and result, and change them. Only that link is affected: browsers still reach the portal, phpMyAdmin and pgAdmin over HTTPS.
+- **PostgreSQL**: only SCRAM-SHA-256 logins are accepted (`require_auth=scram-sha-256`), so the password itself never crosses the network. A server that asks for an MD5 or clear-text password is refused.
+- **MySQL / MariaDB**: the usual logins don't send the password in clear text, but PHP's MySQL driver sends it if the server, or an attacker posing as it, asks for it. Use a long random password for these users.
+- Turning the switch off again blocks these servers at once: their open phpMyAdmin and pgAdmin sessions close, and they can't be tested or opened until their owner switches them to TLS or an SSH tunnel. They stay saved, so turning the switch back on lets them open again.
 
 ## Security model
 
@@ -140,7 +175,7 @@ Abuse limits (servers per account, tests per minute, lockouts, sessions, import 
 | pgAdmin keeping or reusing passwords | Every pgAdmin connection (Backup and Restore included) gets its password from the open ticket of that request: pgAdmin saves none, can't switch to another database user, and stops connecting within a minute after the portal session ends. |
 | A malicious "database server" | `LOAD DATA LOCAL INFILE` disabled; no program execution in phpMyAdmin's PHP; pgAdmin reads certificate and key files only from the user's own folder; read-only filesystems; no secrets in either container. |
 | Password guessing through the portal | Lockout per account and target after repeated failures; tests per minute limit; per-IP limits at the gateway. |
-| Eavesdropping between portal and remote databases | TLS with certificate verification (the system CAs are always passed explicitly; PHP's MySQL driver otherwise skips the check), pinned self-signed certificates, or SSH with a pinned host key. Plain connections are refused. |
+| Eavesdropping between portal and remote databases | TLS with certificate verification (the system CAs are always passed explicitly; PHP's MySQL driver otherwise skips the check), pinned self-signed certificates, or SSH with a pinned host key. Plain connections are refused unless an admin allows [Not encrypted](#not-encrypted); PostgreSQL logins over them must use SCRAM-SHA-256. |
 | Vault data stolen from a backup | Passwords are encrypted with `VAULT_KEY`, which is not stored on the data volume. |
 | Root access | `root` (MySQL) and `postgres` (PostgreSQL) can't be saved, tested or used. Users are warned when an account or role has administrator-level privileges. |
 
@@ -150,6 +185,7 @@ Hardening: all containers run with `no-new-privileges`, all Linux capabilities d
 - phpMyAdmin wasn't designed for many untrusted users sharing one installation. A future phpMyAdmin bug that lets a signed-in user run code could expose other users' **currently open** sessions. The design limits this (no stored secrets, read-only filesystem, no internal network access), but **keep phpMyAdmin updated quickly**.
 - "TLS, self-signed certificate" with a certificate whose name doesn't match the host (for example MySQL's auto-generated one) is checked by fingerprint **before** each connection, because PHP's MySQL driver can't pin a certificate inside the connection. If the certificate's name matches the host, the driver enforces the pin itself ("strict").
 - If a server's SSH host key changes, connections stop until the owner runs a test and trusts the new key.
+- With [Not encrypted](#not-encrypted) allowed, those connections can be read and changed on the way, and for MySQL / MariaDB someone in the middle can also obtain the password. Keep the switch off unless a server really can't use TLS or SSH.
 - pgAdmin is built for several users, but it is one shared process (it can only run as one). A pgAdmin bug that lets a signed-in user run code could expose other users' **currently open** sessions, as with phpMyAdmin. pgAdmin fixed several such bugs in 2024 and 2025: **keep it updated quickly**.
 - DB Portal's layer in pgAdmin hooks into pgAdmin's internals. Before deploying a new pgAdmin version, run `test/run-e2e.sh`.
 - For PostgreSQL, "TLS, self-signed certificate" pins a self-signed certificate inside the connection itself (PostgreSQL's client trusts exactly that certificate). A certificate from an authority you didn't upload is checked by fingerprint before each new connection instead.
@@ -168,7 +204,7 @@ Hardening: all containers run with `no-new-privileges`, all Linux capabilities d
 
 ## Testing locally
 
-`test/run-e2e.sh` builds everything and runs it next to a stand-in identity provider, Traefik (as Dokploy runs it), local and remote MySQL, MariaDB and PostgreSQL test databases (private CA, self-signed, SSH bastion), then runs about 200 browser-level and network checks. Needs Docker with Compose v2.33+.
+`test/run-e2e.sh` builds everything and runs it next to a stand-in identity provider, Traefik (as Dokploy runs it), local and remote MySQL, MariaDB and PostgreSQL test databases (private CA, self-signed, SSH bastion), then runs about 230 browser-level and network checks. Needs Docker with Compose v2.33+.
 
 ```sh
 test/run-e2e.sh            # run and clean up

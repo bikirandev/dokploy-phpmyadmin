@@ -11,7 +11,8 @@ use DbPortal\Response;
 use DbPortal\Settings;
 
 /**
- * Platform admin: abuse limits and account suspension. Admins never see database passwords.
+ * Platform admin: security switches, abuse limits and account suspension. Admins never see
+ * database passwords.
  */
 final class AdminController
 {
@@ -20,7 +21,29 @@ final class AdminController
         'limits-reset' => 'Limits reset to the defaults.',
         'suspended' => 'Account suspended and signed out everywhere.',
         'reactivated' => 'Account reactivated.',
+        'plain-on' => 'Saved. Remote servers can now use “Not encrypted”.',
+        'plain-off' => 'Saved. Unencrypted connections are off: those servers are blocked and their open sessions were closed.',
     ];
+
+    public static function security(Ctx $ctx): never
+    {
+        Guard::user($ctx);
+        Guard::admin($ctx);
+        Guard::csrf($ctx);
+        $on = $ctx->req->post('allow_plain') === '1';
+        $was = $ctx->settings->allowPlain();
+        $ctx->settings->setPolicy('allow_plain', $on);
+        if ($on && !$was) {
+            $ctx->log('change', 'Allowed unencrypted connections', 'Remote servers can use “Not encrypted”');
+        } elseif (!$on && $was) {
+            // Close the open phpMyAdmin and pgAdmin sessions of those servers right away.
+            $closed = $ctx->tickets->revokeForMethod('plain');
+            $stats = self::plainStats($ctx);
+            $ctx->log('change', 'Turned off unencrypted connections', $stats['servers'] . ' server' . ($stats['servers'] === 1 ? '' : 's')
+                . ' blocked, ' . $closed . ' open session' . ($closed === 1 ? '' : 's') . ' closed');
+        }
+        Response::redirect('/admin?notice=' . ($on ? 'plain-on' : 'plain-off'), 303);
+    }
 
     public static function index(Ctx $ctx): never
     {
@@ -107,6 +130,16 @@ final class AdminController
             'accounts' => $accounts,
             'query' => $query,
             'notice' => self::NOTICES[$ctx->req->query('notice')] ?? '',
+            'allowPlain' => $ctx->settings->allowPlain(),
+            'plain' => self::plainStats($ctx),
         ], $status);
+    }
+
+    /** @return array{servers: int, accounts: int} servers set to "Not encrypted", in all accounts */
+    private static function plainStats(Ctx $ctx): array
+    {
+        $row = $ctx->db->one("SELECT COUNT(*) AS servers, COUNT(DISTINCT user_id) AS accounts FROM servers WHERE method = 'plain'");
+
+        return ['servers' => (int) ($row['servers'] ?? 0), 'accounts' => (int) ($row['accounts'] ?? 0)];
     }
 }

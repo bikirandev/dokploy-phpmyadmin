@@ -101,6 +101,7 @@ services:
 
   # Remote, MySQL with its auto-generated self-signed certificate (pinned, checked before connecting).
   # Its address doubles as "this server's public IP" (EGRESS_IP in .env.test).
+  # plain_user first signs in without TLS ("Not encrypted").
   remote-selfsigned:
     image: mysql:8.4
     environment:
@@ -108,6 +109,8 @@ services:
       MYSQL_DATABASE: legacy
       MYSQL_USER: legacy_admin
       MYSQL_PASSWORD: LegacyPass-2026!
+    volumes:
+      - ./test/fixtures/mysql-plain.sql:/docker-entrypoint-initdb.d/plain.sql:ro
     networks:
       test-remote:
         ipv4_address: 10.250.250.200
@@ -239,7 +242,7 @@ services:
       interval: 5s
       retries: 30
 
-  # Remote PostgreSQL without TLS (must be refused)
+  # Remote PostgreSQL without TLS: refused over TLS, works as "Not encrypted" (SCRAM logins only)
   pg-plain:
     image: postgres:17-alpine
     environment:
@@ -247,6 +250,7 @@ services:
       APP_DB: plain
     volumes:
       - ./test/fixtures/pg-app.sh:/docker-entrypoint-initdb.d/app.sh:ro
+      - ./test/fixtures/pg-md5.sh:/docker-entrypoint-initdb.d/zz-md5.sh:ro
     networks:
       test-remote:
         aliases:

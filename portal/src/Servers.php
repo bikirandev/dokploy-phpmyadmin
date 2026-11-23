@@ -10,7 +10,8 @@ namespace DbPortal;
 final class Servers
 {
     public const ENVIRONMENTS = ['Production', 'Staging', 'Development'];
-    public const METHODS = ['internal', 'tls', 'pinned', 'ssh'];
+    /** "plain" (Not encrypted) is only offered while an admin allows it. */
+    public const METHODS = ['internal', 'tls', 'pinned', 'ssh', 'plain'];
 
     /** Database engines: MySQL / MariaDB open in phpMyAdmin, PostgreSQL in pgAdmin. */
     public const MYSQL = 'mysql';

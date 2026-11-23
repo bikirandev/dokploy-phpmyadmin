@@ -5,7 +5,9 @@
 /** @var array<string, string> $errors */
 /** @var int $used */
 /** @var int $limit */
+/** @var bool $allowPlain an admin allows "Not encrypted" */
 $isEdit = $server !== null;
+$plainBlocked = $isEdit && $server['method'] === 'plain' && !$allowPlain;
 $ctx->title = $isEdit ? 'Edit server' : 'Add server';
 
 $val = static fn (string $key, string $default = ''): string => isset($values[$key]) && $values[$key] !== '' ? $values[$key] : $default;
@@ -85,7 +87,9 @@ $ph = static fn (string $mysql, string $postgres): string => ' placeholder="' . 
             <input class="sr-only" type="radio" name="location" value="remote"<?= $checked('location', 'remote', 'remote') ?>>
             <span class="option-icon"><?= icon('globe', 20) ?></span>
             <span class="option-text"><span class="option-title">Remote server</span>
-              <span class="option-desc">Any database server you manage, reached over TLS or an SSH tunnel.</span></span>
+              <span class="option-desc"><?= $allowPlain
+                  ? 'Any database server you manage, reached over TLS, an SSH tunnel, or without encryption.'
+                  : 'Any database server you manage, reached over TLS or an SSH tunnel.' ?></span></span>
             <span class="radio-dot" aria-hidden="true"></span>
           </label>
         </fieldset>
@@ -110,6 +114,11 @@ $ph = static fn (string $mysql, string $postgres): string => ' placeholder="' . 
         </div>
 
         <div class="when-remote stack-18">
+          <?php if ($plainBlocked): ?>
+            <div class="callout callout-danger"><?= icon('alert', 20) ?>
+              <span>This server connected without encryption, which an admin has turned off. Choose TLS or an SSH tunnel, test, and save to open it again.</span>
+            </div>
+          <?php endif; ?>
           <fieldset class="stack-8">
             <legend class="label">How should we connect?</legend>
             <div class="options">
@@ -134,10 +143,43 @@ $ph = static fn (string $mysql, string $postgres): string => ' placeholder="' . 
                   <span class="option-desc">For databases that aren't open to the internet. We connect over SSH first.</span></span>
                 <span class="radio-dot" aria-hidden="true"></span>
               </label>
+              <?php if ($allowPlain): ?>
+                <label class="option">
+                  <input class="sr-only" type="radio" name="method" value="plain"<?= $checked('method', 'plain', 'tls') ?>>
+                  <span class="option-icon warn"><?= icon('unlock', 20) ?></span>
+                  <span class="option-text"><span class="option-title">Not encrypted <span class="tag-warn">Not recommended</span></span>
+                    <span class="option-desc">For servers that can't use TLS or SSH yet. Anyone on the network path can read and change the traffic.</span></span>
+                  <span class="radio-dot" aria-hidden="true"></span>
+                </label>
+              <?php endif; ?>
             </div>
             <?= $error('method') ?>
-            <span class="small muted">Unencrypted connections aren't allowed.</span>
+            <?php if (!$allowPlain): ?>
+              <span class="small muted">Unencrypted connections aren't allowed.</span>
+            <?php endif; ?>
           </fieldset>
+
+          <?php if ($allowPlain): ?>
+            <div class="when-plain stack-12">
+              <div class="callout callout-warn" role="note"><?= icon('alert', 20) ?>
+                <div class="stack-8 min0">
+                  <span class="strong">This connection won't be encrypted</span>
+                  <ul class="risk-list">
+                    <li>Anyone on the network between this portal and the database can read every query and result, and can change them.</li>
+                    <li class="when-postgres">The password is checked with SCRAM-SHA-256, so it never crosses the network. Servers that ask for MD5 or a plain password are refused.</li>
+                    <li class="when-mysql">Someone in the middle can make the connection send the password in clear text. Use a long random password for this user.</li>
+                    <li>Your browser's connection to this portal stays HTTPS. Only the link to the database is affected.</li>
+                  </ul>
+                  <span class="small">Safer: turn on TLS on the database server, or use an SSH tunnel.</span>
+                </div>
+              </div>
+              <label class="check-row is-warn">
+                <input type="checkbox" name="plain_ack" value="1"<?= $val('plain_ack') === '1' ? ' checked' : '' ?><?= $invalid('plain_ack') ?>>
+                <span>I understand that this connection isn't encrypted.</span>
+              </label>
+              <?= $error('plain_ack') ?>
+            </div>
+          <?php endif; ?>
 
           <div class="when-direct stack-18">
             <div class="field-row">

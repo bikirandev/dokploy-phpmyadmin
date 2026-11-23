@@ -38,6 +38,9 @@ PGA_URL = env('PGA_PUBLIC_URL').rstrip('/')
 COOKIE_PREFIX = '__Host-dbp_g'
 MAX_SLOTS = 10
 RUN_DIR = '/run/dbportal'
+# "Not encrypted" (allowed by an admin): no TLS, and the password only through SCRAM, so it never
+# crosses the network. Used by the tester and by every connection pgAdmin opens.
+PLAIN_PARAMS = {'sslmode': 'disable', 'require_auth': 'scram-sha-256'}
 SYSTEM_CA = '/etc/ssl/certs/ca-certificates.crt'
 
 _B64 = re.compile(r'^[A-Za-z0-9_-]+$')

@@ -5,22 +5,59 @@
 /** @var list<array<string, mixed>> $accounts */
 /** @var string $query */
 /** @var string $notice */
+/** @var bool $allowPlain */
+/** @var array{servers: int, accounts: int} $plain servers set to "Not encrypted" */
 use DbPortal\Settings;
 use DbPortal\View;
 
 $ctx->title = 'Admin';
 $me = (int) $ctx->user['id'];
+$plainCount = $plain['servers'] . ' server' . ($plain['servers'] === 1 ? '' : 's') . ' in '
+    . $plain['accounts'] . ' account' . ($plain['accounts'] === 1 ? '' : 's');
 ?>
 <div class="page-head">
   <div class="stack-8 head-text">
     <h1>Admin</h1>
-    <p class="muted">Platform controls for <?= e($ctx->cfg->providerName) ?> staff. Admins can change limits and suspend accounts, but never see anyone's database passwords.</p>
+    <p class="muted">Platform controls for <?= e($ctx->cfg->providerName) ?> staff. Admins can change security settings and limits and suspend accounts, but never see anyone's database passwords.</p>
   </div>
 </div>
 
 <?php if ($notice !== ''): ?>
   <div class="callout callout-success" role="status"><?= icon('check', 20) ?><span><?= e($notice) ?></span></div>
 <?php endif; ?>
+
+<section class="card form-section" aria-labelledby="security-title">
+  <div class="stack-4">
+    <h2 id="security-title">Security</h2>
+    <p class="small muted">Applies to every account. Changes apply immediately.</p>
+  </div>
+  <form method="post" action="/admin/security" class="stack-18">
+    <?= csrf_field($ctx) ?>
+    <label class="policy-row">
+      <input type="checkbox" name="allow_plain" value="1"<?= $allowPlain ? ' checked' : '' ?>>
+      <span class="stack-4">
+        <span class="policy-title"><?= e(Settings::POLICIES['allow_plain']) ?></span>
+        <span class="small muted">Off by default. When on, people can choose “Not encrypted” when they add a remote server. Queries, results and sessions to those servers travel without encryption.</span>
+      </span>
+    </label>
+    <?php if ($plain['servers'] > 0): ?>
+      <div class="callout callout-info"><?= icon('info', 20) ?>
+        <div class="stack-4 min0">
+          <?php if ($allowPlain): ?>
+            <span><?= e($plainCount) ?> connect<?= $plain['servers'] === 1 ? 's' : '' ?> without encryption.</span>
+            <span class="small">Turning this off blocks them and closes their open sessions. They stay saved, so their owners can switch them to TLS or an SSH tunnel.</span>
+          <?php else: ?>
+            <span><?= e($plainCount) ?> <?= $plain['servers'] === 1 ? 'is' : 'are' ?> blocked because they connect without encryption.</span>
+            <span class="small">Turning this on lets them open again. Their owners can also switch them to TLS or an SSH tunnel.</span>
+          <?php endif; ?>
+        </div>
+      </div>
+    <?php endif; ?>
+    <div class="row-wrap">
+      <button class="btn btn-primary" type="submit">Save security settings</button>
+    </div>
+  </form>
+</section>
 
 <section class="card form-section" aria-labelledby="limits-title">
   <div class="stack-4">
