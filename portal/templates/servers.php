@@ -6,18 +6,21 @@
 /** @var string $query */
 /** @var string $notice */
 /** @var int $limit */
+/** @var bool $allowPlain an admin allows "Not encrypted" */
 use DbPortal\View;
 
 $ctx->title = 'My servers';
 $envClass = ['Production' => 'env-prod', 'Staging' => 'env-staging', 'Development' => 'env-dev'];
 $groups = [
     'local' => ['On this server', 'Dokploy databases on the pma-databases network', 'server'],
-    'remote' => ['Remote', 'Your other servers, over TLS or an SSH tunnel', 'globe'],
+    'remote' => ['Remote', $allowPlain ? 'Your other servers, over TLS, an SSH tunnel or not encrypted'
+        : 'Your other servers, over TLS or an SSH tunnel', 'globe'],
 ];
 $connection = static fn (array $s): array => match ($s['method']) {
     'internal' => ['network', 'Internal network', 'conn-internal'],
     'tls' => ['lock', 'TLS · certificate verified', 'conn-tls'],
     'pinned' => ['pin', 'TLS · pinned certificate', 'conn-tls'],
+    'plain' => ['unlock', 'Not encrypted', 'conn-plain'],
     default => ['terminal', 'SSH tunnel via ' . $s['ssh_host'], 'conn-ssh'],
 };
 $atLimit = $counts['all'] >= $limit;
@@ -74,7 +77,8 @@ $tool = static fn (array $s): string => $s['kind'] === 'postgres' ? 'pgAdmin' : 
       $items = array_values(array_filter($servers, static fn (array $s): bool => $s['location'] === $location));
       if ($items === []) {
           continue;
-      } ?>
+      }
+      $anyBlocked = false; ?>
     <section class="group" aria-labelledby="group-<?= e($location) ?>">
       <div class="group-head">
         <?= icon($groupIcon) ?>
@@ -84,7 +88,10 @@ $tool = static fn (array $s): string => $s['kind'] === 'postgres' ? 'pgAdmin' : 
       <ul class="server-list">
         <?php foreach ($items as $s):
             [$connIcon, $connLabel, $connClass] = $connection($s);
-            $locked = (int) $s['locked_for'] > 0; ?>
+            $locked = (int) $s['locked_for'] > 0;
+            // "Not encrypted" while an admin has it turned off: can't be opened.
+            $blocked = $s['method'] === 'plain' && !$allowPlain;
+            $anyBlocked = $anyBlocked || $blocked; ?>
           <li class="server-row">
             <div class="server-main">
               <span class="server-icon" aria-hidden="true"><?= icon('db', 18) ?></span>
@@ -109,10 +116,15 @@ $tool = static fn (array $s): string => $s['kind'] === 'postgres' ? 'pgAdmin' : 
               <?php if ($locked): ?>
                 <span class="badge badge-danger">Locked <?= (int) ceil($s['locked_for'] / 60) ?> min</span>
               <?php endif; ?>
+              <?php if ($blocked): ?>
+                <span class="badge badge-danger">Blocked by admin</span>
+              <?php endif; ?>
             </div>
             <div class="server-actions">
               <a class="btn btn-icon" href="/servers/<?= (int) $s['id'] ?>/edit" aria-label="Edit <?= e($s['name']) ?>"><?= icon('edit', 18) ?></a>
-              <?php if ($s['cred_mode'] === 'saved'): ?>
+              <?php if ($blocked): ?>
+                <span class="btn btn-outline is-disabled" aria-disabled="true">Open <?= icon('open') ?></span>
+              <?php elseif ($s['cred_mode'] === 'saved'): ?>
                 <form method="post" action="/servers/<?= (int) $s['id'] ?>/open" target="_blank">
                   <?= csrf_field($ctx) ?>
                   <button class="btn btn-outline" type="submit" title="Open in <?= e($tool($s)) ?>"<?= $locked ? ' disabled' : '' ?>>Open <?= icon('open') ?></button>
@@ -126,6 +138,11 @@ $tool = static fn (array $s): string => $s['kind'] === 'postgres' ? 'pgAdmin' : 
           </li>
         <?php endforeach; ?>
       </ul>
+      <?php if ($anyBlocked): ?>
+        <p class="small muted with-icon"><?= icon('info') ?>
+          <span>An admin turned off unencrypted connections. Edit a blocked server to use TLS or an SSH tunnel to open it again.</span>
+        </p>
+      <?php endif; ?>
     </section>
   <?php endforeach; ?>
 <?php endif; ?>

@@ -93,6 +93,26 @@ def certificate(host, port, timeout=8):
         sock.close()
 
 
+def offers_tls(host, port, timeout=5):
+    """
+    Whether the server answers PostgreSQL's TLS request with yes. Nothing else is sent, so this
+    never logs in. None when that can't be told.
+    """
+    try:
+        sock = socket.create_connection((host, port), timeout=timeout)
+    except OSError:
+        return None
+    try:
+        sock.settimeout(timeout)
+        sock.sendall(_SSL_REQUEST)
+        answer = sock.recv(1)
+        return answer == b'S' if answer in (b'S', b'N') else None
+    except OSError:
+        return None
+    finally:
+        sock.close()
+
+
 def cached_fingerprint(key, host, port):
     """Fingerprint check before connecting, cached for a few minutes per open session."""
     now = time.time()

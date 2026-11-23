@@ -31,6 +31,8 @@ final class ServerController
         'open-expired' => 'That link expired. Open the server again.',
     ];
 
+    private const BLOCKED_MESSAGE = 'An admin turned off unencrypted connections. Edit this server to use TLS or an SSH tunnel.';
+
     public static function index(Ctx $ctx): never
     {
         Guard::user($ctx);
@@ -75,6 +77,7 @@ final class ServerController
             'query' => $query,
             'notice' => $notice,
             'limit' => $ctx->settings->get('servers_per_account'),
+            'allowPlain' => $ctx->settings->allowPlain(),
         ]);
     }
 
@@ -105,7 +108,8 @@ final class ServerController
             $secrets['db_password'] = '';
         }
         $ctx->servers->create($userId, $parsed['data'], $secrets);
-        $ctx->log('change', 'Server added', $parsed['data']['name'] . ($secrets['db_password'] !== '' ? ', password saved to vault' : ''));
+        $ctx->log('change', 'Server added', $parsed['data']['name'] . ($parsed['data']['method'] === 'plain' ? ', not encrypted' : '')
+            . ($secrets['db_password'] !== '' ? ', password saved to vault' : ''));
         Response::redirect('/servers?notice=added', 303);
     }
 
@@ -114,7 +118,12 @@ final class ServerController
     {
         Guard::user($ctx);
         $server = self::owned($ctx, (int) $params[0]);
-        self::form($ctx, $server, ServerForm::valuesFromServer($server), []);
+        $values = ServerForm::valuesFromServer($server);
+        if (self::blocked($ctx, $server)) {
+            // "Not encrypted" was turned off: start from TLS, the form explains why.
+            $values['method'] = 'tls';
+        }
+        self::form($ctx, $server, $values, []);
     }
 
     /** @param list<string> $params */
@@ -133,7 +142,7 @@ final class ServerController
         }
         $ctx->servers->update($server, $parsed['data'], $secrets);
         $ctx->tickets->revokeForServer((int) $server['id']);
-        $ctx->log('change', 'Server updated', $parsed['data']['name']);
+        $ctx->log('change', 'Server updated', $parsed['data']['name'] . ($parsed['data']['method'] === 'plain' ? ', not encrypted' : ''));
         Response::redirect('/servers?notice=updated', 303);
     }
 
@@ -165,7 +174,9 @@ final class ServerController
         $existing = $existingId > 0 ? self::owned($ctx, $existingId) : null;
         $parsed = ServerForm::parse($ctx->req, $ctx, $existing, true);
         if ($parsed['errors'] !== []) {
-            Response::json(['ok' => false, 'error' => 'Fix the highlighted fields first.', 'errors' => $parsed['errors']], 422);
+            // The connection method has no field to highlight: show its message itself.
+            $message = $parsed['errors']['method'] ?? 'Fix the highlighted fields first.';
+            Response::json(['ok' => false, 'error' => $message, 'errors' => $parsed['errors']], 422);
         }
         $data = $parsed['data'];
         $target = Servers::lockTarget($userId, $data, (string) $data['db_user']);
@@ -212,10 +223,18 @@ final class ServerController
         Response::json([
             'ok' => !empty($result['ok']),
             'error' => $result['error'] ?? null,
-            'checks' => array_values(array_map('strval', (array) ($result['checks'] ?? []))),
+            // A check is a line of text, or {text, warn} for one shown as a warning.
+            'checks' => array_values(array_map(
+                static fn (mixed $c): string|array => is_array($c)
+                    ? ['text' => (string) ($c['text'] ?? ''), 'warn' => !empty($c['warn'])]
+                    : (string) $c,
+                (array) ($result['checks'] ?? []),
+            )),
             'grants' => array_values(array_map('strval', (array) ($result['grants'] ?? []))),
             'superuser' => !empty($result['superuser']),
             'pin' => $result['pin'] ?? null,
+            // "Not encrypted" was tested against a server that does offer TLS.
+            'tls_offered' => !empty($result['tls_offered']),
         ]);
     }
 
@@ -224,7 +243,13 @@ final class ServerController
     {
         Guard::user($ctx);
         $server = self::owned($ctx, (int) $params[0]);
-        $ctx->render('open', ['server' => $server, 'error' => '', 'user' => (string) $server['db_user']]);
+        $blocked = self::blocked($ctx, $server);
+        $ctx->render('open', [
+            'server' => $server,
+            'error' => $blocked ? self::BLOCKED_MESSAGE : '',
+            'user' => (string) $server['db_user'],
+            'blocked' => $blocked,
+        ]);
     }
 
     /** @param list<string> $params */
@@ -238,6 +263,9 @@ final class ServerController
         $kind = (string) $server['kind'];
         $app = Servers::app($kind);
         $appName = Servers::appName($kind);
+        if (self::blocked($ctx, $server)) {
+            self::openFailed($ctx, $server, (string) $server['db_user'], self::BLOCKED_MESSAGE);
+        }
 
         $asked = $server['cred_mode'] !== 'saved';
         $secrets = $ctx->servers->secrets($server);
@@ -319,13 +347,29 @@ final class ServerController
             'errors' => $errors,
             'used' => $ctx->servers->countForUser((int) $ctx->user['id']),
             'limit' => $ctx->settings->get('servers_per_account'),
+            'allowPlain' => $ctx->settings->allowPlain(),
         ], $status);
     }
 
     /** @param array<string, mixed> $server */
     private static function openFailed(Ctx $ctx, array $server, string $dbUser, string $message): never
     {
-        $ctx->render('open', ['server' => $server, 'error' => $message, 'user' => $dbUser], 422);
+        $ctx->render('open', [
+            'server' => $server,
+            'error' => $message,
+            'user' => $dbUser,
+            'blocked' => self::blocked($ctx, $server),
+        ], 422);
+    }
+
+    /**
+     * A "Not encrypted" server can't be opened while an admin has unencrypted connections turned off.
+     *
+     * @param array<string, mixed> $server
+     */
+    private static function blocked(Ctx $ctx, array $server): bool
+    {
+        return $server['method'] === 'plain' && !$ctx->settings->allowPlain();
     }
 
     private static function lockedMessage(int $seconds): string

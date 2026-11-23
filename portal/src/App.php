@@ -48,6 +48,7 @@ final class App
 
         ['GET', '#^/admin$#', [AdminController::class, 'index']],
         ['POST', '#^/admin/limits$#', [AdminController::class, 'limits']],
+        ['POST', '#^/admin/security$#', [AdminController::class, 'security']],
         ['POST', '#^/admin/accounts/(\d{1,10})/(suspend|reactivate)$#', [AdminController::class, 'account']],
 
         ['GET', '#^/internal/pma-auth$#', [InternalController::class, 'pmaAuth']],

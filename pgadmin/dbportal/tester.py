@@ -9,7 +9,7 @@ import time
 import psycopg
 
 from . import net, probe, tunnels
-from .common import RUN_DIR, SYSTEM_CA, AuthFailed, UserError, write_pem
+from .common import PLAIN_PARAMS, RUN_DIR, SYSTEM_CA, AuthFailed, UserError, write_pem
 
 BLOCKED_USER = 'postgres'
 CA_DIR = RUN_DIR + '/ca'
@@ -99,6 +99,20 @@ def privileges(conn):
 def friendly(error, target, database, via_ssh):
     """A connection error explained for the owner, without internal details."""
     message = ' '.join(str(error).split())
+    if 'authentication method requirement' in message:
+        # "Not encrypted" accepts only SCRAM logins (require_auth).
+        if 'hashed password' in message:
+            asked = 'asked for the password as MD5'
+        elif 'cleartext password' in message:
+            asked = 'asked for the password in clear text'
+        elif 'did not complete authentication' in message:
+            asked = 'let this user in without a password'
+        else:
+            asked = "doesn't use SCRAM-SHA-256 for this login"
+        return ('%s %s. Without encryption only SCRAM-SHA-256 logins are allowed. Set password_encryption = '
+                'scram-sha-256 on the server and reset the password, or use TLS.' % (target, asked))
+    if 'no pg_hba.conf entry' in message and 'no encryption' in message:
+        return ('%s only accepts encrypted connections. Choose "TLS, self-signed certificate" instead.' % target)
     if 'certificate verify failed' in message:
         return ("TLS failed: the certificate of %s couldn't be verified. Upload its CA certificate, "
                 'or choose "TLS, self-signed certificate".' % target)
@@ -186,6 +200,9 @@ def run(d, full):
             transport = ('self-signed certificate (trust it below)' if not pinned
                          else 'pinned certificate verified' if strict else 'certificate fingerprint matched')
             encrypted = True
+        elif method == 'plain':
+            net.check_remote(host)
+            params = dict(PLAIN_PARAMS)
         elif method == 'ssh':
             ssh = d.get('ssh') if isinstance(d.get('ssh'), dict) else {}
             ssh_host = str(ssh.get('host') or '')
@@ -226,7 +243,10 @@ def run(d, full):
         if method != 'ssh':
             out['checks'].insert(0, 'Reached the server in %d ms' % out['latency_ms'])
         out['checks'].append(out['version'] + ', ' + transport if method == 'ssh' else out['version'])
-        if method != 'ssh':
+        if method == 'plain':
+            out['checks'].append({'text': 'Not encrypted. Queries and results travel in clear text.', 'warn': True})
+            out['checks'].append('Password checked with SCRAM-SHA-256, never sent')
+        elif method != 'ssh':
             out['checks'].append(transport[:1].upper() + transport[1:])
         if full:
             lines, risky, current = privileges(conn)
@@ -235,6 +255,9 @@ def run(d, full):
             out['superuser'] = risky
             if not risky:
                 out['checks'].append('Not a superuser, postgres is not used')
+            if method == 'plain' and probe.offers_tls(host, port):
+                # The owner could encrypt this connection: the portal suggests it.
+                out['tls_offered'] = True
         out['ok'] = True
     except AuthFailed:
         out['auth_failed'] = True

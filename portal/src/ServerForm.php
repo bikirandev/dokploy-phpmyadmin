@@ -35,9 +35,14 @@ final class ServerForm
 
         $location = $req->post('location') === 'local' ? 'local' : 'remote';
         $method = $location === 'local' ? 'internal' : $req->post('method', 'tls');
-        if (!in_array($method, ['tls', 'pinned', 'ssh', 'internal'], true) || ($location === 'remote' && $method === 'internal')) {
+        if (!in_array($method, Servers::METHODS, true) || ($location === 'remote' && $method === 'internal')) {
             $errors['method'] = 'Choose how to connect.';
             $method = 'tls';
+        } elseif ($method === 'plain' && !$ctx->settings->allowPlain()) {
+            $errors['method'] = 'An admin turned off unencrypted connections. Choose TLS or an SSH tunnel.';
+            $method = 'tls';
+        } elseif ($method === 'plain' && !$forTest && $req->post('plain_ack') !== '1') {
+            $errors['plain_ack'] = 'Confirm that you understand this connection isn\'t encrypted.';
         }
 
         // Database endpoint. For SSH it is the address as seen from the SSH server.
@@ -256,6 +261,8 @@ final class ServerForm
             'ssh_db_port' => $isSsh ? (string) $server['port'] : '',
             'db_user' => (string) $server['db_user'],
             'cred_mode' => (string) $server['cred_mode'],
+            // The owner confirmed it when saving the server.
+            'plain_ack' => $server['method'] === 'plain' ? '1' : '',
         ];
     }
 
@@ -264,7 +271,7 @@ final class ServerForm
     {
         $keys = ['name', 'environment', 'kind', 'db_name', 'location', 'method', 'host', 'port', 'internal_host',
             'internal_port', 'ssh_host', 'ssh_port', 'ssh_user', 'ssh_auth', 'ssh_db_host', 'ssh_db_port', 'db_user',
-            'cred_mode'];
+            'cred_mode', 'plain_ack'];
         $values = [];
         foreach ($keys as $key) {
             $values[$key] = $req->post($key);

@@ -415,6 +415,9 @@ def _conn_params(descriptor):
         params.update(sslmode='verify-ca', sslrootcert=_storage_pem(str(descriptor.get('pin_pem') or '')))
     elif method == 'pinned':
         params['sslmode'] = 'require'
+    elif method == 'plain':
+        # "Not encrypted" (allowed by an admin): no TLS, password only through SCRAM.
+        params.update(common.PLAIN_PARAMS)
     else:
         params['sslmode'] = 'prefer'
     return params
@@ -447,7 +450,7 @@ def _prepare(manager, descriptor, real):
             else:
                 port = tunnels.reserve(key) or 1
             host = '127.0.0.1'
-        elif method in ('internal', 'tls', 'pinned'):
+        elif method in ('internal', 'tls', 'pinned', 'plain'):
             if real:
                 if method == 'internal':
                     net.check_internal(host)

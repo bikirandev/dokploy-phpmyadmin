@@ -571,6 +571,92 @@ def main():
     check("pgAdmin connects through the SSH tunnel", page.status_code == 200 and ok, detail)
     alice.refresh_csrf()
 
+    print("\n== Not encrypted (only while an admin allows it)")
+
+    def warnings(result):
+        return [c.get("text", "") for c in result.get("checks", []) if isinstance(c, dict) and c.get("warn")]
+
+    plain_pg = server_data(kind="postgres", name="Plain PG", method="plain", host="pg-plain.test", port="5432",
+                           db_user="app_user", db_password="AppPg-2026!", db_name="plain")
+    code, j = alice.test_server(plain_pg)
+    check("Not encrypted is refused while the admin switch is off",
+          not j.get("ok") and "turned off unencrypted" in (j.get("error") or ""), j)
+    r = alice.get(PORTAL + "/servers/new")
+    check("the form doesn't offer Not encrypted while it's off",
+          'value="plain"' not in r.text and "Unencrypted connections aren" in r.text, r.status_code)
+    r = alice.get(PORTAL + "/admin")
+    check("the Security switch is off by default", 'name="allow_plain" value="1">' in r.text, r.status_code)
+    r = bob.form("/admin/security", {"allow_plain": "1"})
+    check("non-admins can't turn it on", r.status_code == 404, r.status_code)
+    r = alice.form("/admin/security", {"allow_plain": "1"})
+    check("admin allows unencrypted connections", r.status_code == 303
+          and "notice=plain-on" in r.headers.get("Location", ""), r.status_code)
+    r = alice.get(PORTAL + "/servers/new")
+    check("the form now offers Not encrypted, with its warning and confirmation", 'value="plain"' in r.text
+          and "won't be encrypted" in r.text and 'name="plain_ack"' in r.text, r.status_code)
+
+    code, j = alice.test_server(plain_pg)
+    texts = [c.get("text", "") if isinstance(c, dict) else c for c in j.get("checks", [])]
+    check("PostgreSQL without TLS connects, flagged Not encrypted",
+          j.get("ok") and any("Not encrypted" in w for w in warnings(j)), j)
+    check("…the password went through SCRAM-SHA-256", any("SCRAM-SHA-256" in t for t in texts), texts)
+    check("…and a server without TLS gets no TLS hint", j.get("tls_offered") is False, j)
+    code, j = alice.test_server(dict(plain_pg, db_user="md5_user", db_password="Md5Pg-2026!"))
+    check("a login that asks for an MD5 password is refused", not j.get("ok") and "as MD5" in (j.get("error") or ""), j)
+    code, j = alice.test_server(dict(plain_pg, host="pg-tls.test", db_name="analytics"))
+    check("a PostgreSQL server that offers TLS gets a hint to use it", j.get("ok") and j.get("tls_offered") is True, j)
+    r = alice.form("/servers", plain_pg)
+    check("Not encrypted can't be saved without the confirmation", r.status_code == 422
+          and "Confirm that you understand" in r.text, r.status_code)
+    r = alice.form("/servers", dict(plain_pg, plain_ack="1"))
+    check("Not encrypted server saved after confirming", r.status_code == 303, r.status_code)
+    plain_pg_id = alice.server_ids().get("Plain PG")
+    r = alice.get(PORTAL + "/servers")
+    check("the list labels it Not encrypted", "Not encrypted" in r.text and "Blocked by admin" not in r.text)
+    r = alice.get(f"{PORTAL}/servers/{plain_pg_id}/edit")
+    check("editing keeps Not encrypted chosen and confirmed", 'value="plain" checked' in r.text
+          and 'name="plain_ack" value="1" checked' in r.text, r.status_code)
+    page, _ = alice.open_pg(plain_pg_id)
+    ok, detail = pga_open_and_list("Plain PG", "plain")
+    check("pgAdmin connects without TLS (SCRAM login) and lists the database", page.status_code == 200 and ok, detail)
+
+    # plain_user has never signed in: caching_sha2_password does its full sign-in without TLS (RSA key).
+    plain_my = server_data(name="Plain MySQL", method="plain", host="selfsigned.test", db_user="plain_user",
+                           db_password="PlainMy-2026!")
+    code, j = alice.test_server(plain_my)
+    check("MySQL 8.4 connects Not encrypted (caching_sha2_password, first sign-in)",
+          j.get("ok") and any("Not encrypted" in w for w in warnings(j)), j)
+    check("…and as that server offers TLS, the test suggests it", j.get("tls_offered") is True, j)
+    r = alice.form("/servers", dict(plain_my, plain_ack="1"))
+    check("Not encrypted MySQL server saved", r.status_code == 303, r.status_code)
+    plain_my_id = alice.server_ids().get("Plain MySQL")
+    page, plain_slot, _ = alice.open(plain_my_id)
+    check("Not encrypted MySQL opens in phpMyAdmin", plain_slot is not None and page.status_code == 200,
+          getattr(page, "status_code", page))
+    r = alice.get(f"{PMA}/index.php?route=/server/databases&server={plain_slot}")
+    check("phpMyAdmin lists its databases", "legacy" in r.text and "Plain MySQL" in r.text, r.status_code)
+
+    r = alice.form("/admin/security", {})
+    check("admin turns unencrypted connections off", r.status_code == 303
+          and "notice=plain-off" in r.headers.get("Location", ""), r.status_code)
+    r = alice.get(PORTAL + "/admin")
+    check("Admin counts the blocked servers", "2 servers in 1 account are blocked" in r.text, r.status_code)
+    r = alice.get(f"{PMA}/index.php?route=/server/databases&server={plain_slot}")
+    check("…their open phpMyAdmin session is closed at once", "Plain MySQL" not in r.text, r.status_code)
+    pga.load()
+    check("…and pgAdmin no longer lists the server", "Plain PG" not in pga.nodes(f"/browser/server/nodes/{pga.group()}/"))
+    r = alice.get(PORTAL + "/servers")
+    check("the list marks both Blocked by admin", r.text.count("Blocked by admin") == 2, r.status_code)
+    page, blocked_slot, _ = alice.open(plain_my_id)
+    check("a blocked server can't be opened", blocked_slot is None and page.status_code == 422
+          and "turned off unencrypted" in page.text, getattr(page, "status_code", page))
+    code, j = alice.test_server(dict(plain_my, plain_ack="1"))
+    check("…nor tested", not j.get("ok") and "turned off unencrypted" in (j.get("error") or ""), j)
+    r = alice.get(f"{PORTAL}/servers/{plain_my_id}/edit")
+    check("its edit page explains why and starts from TLS", "which an admin has turned off" in r.text
+          and 'value="plain"' not in r.text and 'value="tls" checked' in r.text, r.status_code)
+    alice.refresh_csrf()
+
     print("\n== This server's own address (EGRESS_IP=10.250.250.200) and blocked addresses")
     code, j = alice.test_server(dict(pinned, host="10.250.250.200"))
     check("a database on this server can be added as a remote server (its public IP)", j.get("ok"), j)

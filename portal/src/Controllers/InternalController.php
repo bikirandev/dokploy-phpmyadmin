@@ -42,7 +42,7 @@ final class InternalController
         if ($userId === null) {
             Response::json(['servers' => []], 200);
         }
-        Response::json(['servers' => $ctx->tickets->fetch($userId, self::tickets($body), 'pma')]);
+        Response::json(['servers' => $ctx->tickets->fetch($userId, self::tickets($body), 'pma', $ctx->settings->allowPlain())]);
     }
 
     /**
@@ -61,8 +61,8 @@ final class InternalController
         }
         Response::json([
             'user' => 'dbp-' . substr(hash('sha256', 'dbportal/pga-user|' . $user['subject']), 0, 24),
-            'servers' => $ctx->tickets->fetch($userId, self::tickets($body), 'pga'),
-            'open_rows' => $ctx->tickets->openPgaRows($userId),
+            'servers' => $ctx->tickets->fetch($userId, self::tickets($body), 'pga', $ctx->settings->allowPlain()),
+            'open_rows' => $ctx->tickets->openPgaRows($userId, $ctx->settings->allowPlain()),
         ]);
     }
 
@@ -78,7 +78,7 @@ final class InternalController
             (array) ($body['tickets'] ?? []),
             static fn (mixed $h): bool => is_string($h) && preg_match('/^[a-f0-9]{64}$/', $h) === 1,
         )));
-        Response::json(['alive' => $ctx->tickets->alive(array_slice($hashes, 0, 500), 'pga')]);
+        Response::json(['alive' => $ctx->tickets->alive(array_slice($hashes, 0, 500), 'pga', $ctx->settings->allowPlain())]);
     }
 
     private static function toolAuth(Ctx $ctx, string $app): never
