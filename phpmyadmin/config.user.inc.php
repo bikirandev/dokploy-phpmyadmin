@@ -12,6 +12,7 @@ require_once '/opt/dbportal/lib.php';
 
 use DbPortalPma\Bridge;
 use DbPortalPma\Env;
+use DbPortalPma\Selection;
 use DbPortalPma\Servers;
 
 // Secrets and addresses
@@ -37,18 +38,21 @@ $cfg['SaveDir'] = '';
 $cfg['ExecTimeLimit'] = 300;
 $cfg['ShowCreateDb'] = true;
 
-// Servers: only the current user's open sessions (decrypted with keys from their cookies)
+// Servers: only the current user's open sessions (decrypted with keys from their cookies), numbered
+// by portal server. Each tab stays on the server its page names (see Selection).
 $cfg['Servers'] = [];
-$dbportalDescriptors = Bridge::load();
-$dbportalRequested = (int) ($_REQUEST['server'] ?? 0);
-$dbportalCurrent = isset($dbportalDescriptors[$dbportalRequested])
-    ? $dbportalRequested
-    : (array_key_first($dbportalDescriptors) ?? 0);
-foreach ($dbportalDescriptors as $dbportalSlot => $dbportalDescriptor) {
-    $cfg['Servers'][$dbportalSlot] = Servers::config($dbportalSlot, $dbportalDescriptor, $dbportalSlot === $dbportalCurrent);
-}
-if ($cfg['Servers'] === []) {
+$dbportalOpen = Bridge::load();
+if ($dbportalOpen === []) {
+    // Nothing open: phpMyAdmin sends the visitor back to the portal.
     $cfg['Servers'][1] = Servers::placeholder();
+    $cfg['ServerDefault'] = 1;
+} else {
+    $dbportalCurrent = Selection::choose($dbportalOpen);
+    Selection::logOutOne($dbportalOpen, $dbportalCurrent);
+    foreach ($dbportalOpen as $dbportalNumber => $dbportalDescriptor) {
+        $cfg['Servers'][$dbportalNumber] = Servers::config((int) $dbportalDescriptor['slot'], $dbportalDescriptor, $dbportalNumber === $dbportalCurrent);
+    }
+    // 0: phpMyAdmin puts server=N into every link and form, and uses no server for a request without one.
+    $cfg['ServerDefault'] = 0;
 }
-$cfg['ServerDefault'] = $dbportalCurrent > 0 ? $dbportalCurrent : 1;
-unset($dbportalDescriptors, $dbportalRequested, $dbportalCurrent, $dbportalSlot, $dbportalDescriptor);
+unset($dbportalOpen, $dbportalCurrent, $dbportalNumber, $dbportalDescriptor);

@@ -34,8 +34,16 @@ final class PmaHostController
         }
         $slot = (int) $row['slot'];
         Auth::setCookie(Tickets::cookiePrefix($app) . $slot, $cookie, 'Lax');
-        // pgAdmin shows every open server in one tree; phpMyAdmin selects the server by number.
-        Response::redirect($app === 'pga' ? '/' : '/index.php?server=' . $slot, 303);
+        if ($app === 'pga') {
+            // pgAdmin shows every open server in one tree.
+            Response::redirect('/', 303);
+        }
+        // phpMyAdmin selects the server by number, and keeps it in every link of this tab.
+        $idHash = Tickets::idHashFromCookie($cookie);
+        $ticket = $idHash !== null ? $ctx->db->one('SELECT server_id FROM tickets WHERE id_hash = ?', [$idHash]) : null;
+        Response::redirect($ticket !== null
+            ? '/index.php?server=' . (Tickets::PMA_NUMBER_OFFSET + (int) $ticket['server_id'])
+            : '/index.php', 303);
     }
 
     /**

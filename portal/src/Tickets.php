@@ -18,6 +18,12 @@ final class Tickets
     public const PGA_COOKIE_PREFIX = '__Host-dbp_g';
     public const MAX_SLOTS = 10;
     public const APPS = ['pma', 'pga'];
+    /**
+     * phpMyAdmin's number for an open server ("server=N" in its links) is the server's id plus this
+     * offset (phpMyAdmin's Bridge::NUMBER_OFFSET). A number always means the same server, and it never
+     * matches a cookie slot (1-10), which earlier versions used as the number.
+     */
+    public const PMA_NUMBER_OFFSET = 1000;
     private const MAX_LIFETIME = 43200;
 
     public function __construct(private readonly Db $db)
@@ -171,7 +177,7 @@ final class Tickets
      *
      * @param array<int, string> $tickets base64url ticket ids by slot
      * @param bool $allowPlain false when an admin turned off unencrypted connections
-     * @return list<array{slot: int, c: string, n: string}>
+     * @return list<array{slot: int, server: int, opened: int, c: string, n: string}>
      */
     public function fetch(int $userId, array $tickets, string $app = 'pma', bool $allowPlain = true): array
     {
@@ -206,6 +212,8 @@ final class Tickets
             }
             $out[] = [
                 'slot' => (int) $slot,
+                'server' => (int) $row['server_id'],
+                'opened' => (int) $row['created_at'],
                 'c' => Crypto::b64e((string) $row['ciphertext']),
                 'n' => Crypto::b64e((string) $row['nonce']),
             ];

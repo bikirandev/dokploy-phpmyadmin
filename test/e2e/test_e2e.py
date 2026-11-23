@@ -108,7 +108,10 @@ class User:
         return {html.unescape(name): int(sid) for sid, name in pairs}
 
     def open(self, server_id, extra=None):
-        """Opens a server and follows the hand-over to phpMyAdmin. Returns (response, slot, cookie header)."""
+        """Opens a server and follows the hand-over to phpMyAdmin.
+
+        Returns (response, phpMyAdmin's server number, cookie header); cookie_slot() reads the cookie's slot.
+        """
         data = {"_csrf": self.csrf}
         data.update(extra or {})
         r = self.post(f"{PORTAL}/servers/{server_id}/open", data=data)
@@ -175,6 +178,42 @@ class PgAdmin:
 
     def databases(self, gid, sid):
         return self.nodes(f"/browser/database/nodes/{gid}/{sid}/")
+
+
+def cookie_slot(set_cookie):
+    """The slot of a phpMyAdmin ticket cookie (__Host-dbp_sN), from its Set-Cookie header."""
+    m = re.search(r"__Host-dbp_s(\d+)=", set_cookie or "")
+    return int(m.group(1)) if m else None
+
+
+def pma_json(r):
+    try:
+        return r.json()
+    except ValueError:
+        return {"raw": r.text[:300]}
+
+
+def pma_link(page_text, route, db):
+    """The href phpMyAdmin itself puts on a database in its navigation tree (what a click follows)."""
+    for href in re.findall(r'href="([^"]+)"', page_text):
+        h = html.unescape(href)
+        if f"route={route}" in h and re.search(r"[?&]db=" + re.escape(db) + r"(&|$)", h):
+            return PMA + "/" + h.lstrip("./")
+    return None
+
+
+def pma_sql(user, number, sql, fields=None):
+    """Runs SQL through phpMyAdmin's own SQL box for a server, with the fields its form carries
+    (or with the fields of a form loaded earlier). Returns (form fields, result text)."""
+    if fields is None:
+        page = user.get(f"{PMA}/index.php?route=/server/sql&server={number}")
+        form = re.search(r'<form[^>]+id="sqlqueryform"[^>]*>(.*?)</form>', page.text, re.S)
+        fields = dict(re.findall(r'<input type="hidden" name="([^"]+)" value="([^"]*)"', form.group(1))) if form else {}
+    data = {k: html.unescape(v) for k, v in fields.items()}
+    data.update({"sql_query": sql, "ajax_request": "true", "ajax_page_request": "true"})
+    r = user.post(f"{PMA}/index.php?route=/import", data=data, headers={"X-Requested-With": "XMLHttpRequest"})
+    j = pma_json(r)
+    return fields, html.unescape(re.sub(r"<[^>]+>", " ", str(j.get("message") or j.get("error") or j.get("raw") or "")))
 
 
 def pga_cookie(user):
@@ -306,6 +345,57 @@ def main():
     check("portal session cookie never reaches phpMyAdmin's host",
           not any(c.name == "__Host-dbp_session" and c.domain.startswith("pma") for c in alice.session.cookies))
 
+    print("\n== Two servers open at once (a tab each), used through phpMyAdmin's own links and forms")
+    r = alice.form("/servers", server_data(name="CRM – Staging", location="local", internal_host="other-db",
+                                           db_user="crm_admin", db_password="CrmPass-2026!", cred_mode="saved"))
+    crm = alice.server_ids().get("CRM – Staging")
+    page, crm_number, crm_cookie = alice.open(crm)
+    shop_number = slot
+    check("each open server has its own number in phpMyAdmin (server id + 1000)", crm_number is not None
+          and shop_number != crm_number and shop_number == 1000 + shop and crm_number == 1000 + crm, (shop_number, crm_number))
+    sql_forms = {}
+    for name, number, db, user in [("Shop – Production", shop_number, "shop", "shop_admin"),
+                                   ("CRM – Staging", crm_number, "crm", "crm_admin")]:
+        home = alice.get(f"{PMA}/index.php?server={number}")
+        link = pma_link(home.text, "/database/structure", db)
+        check(f"{name}: phpMyAdmin's own links name the server", link is not None and f"server={number}" in link, link)
+        r = alice.get((link or PMA) + "&ajax_request=true&ajax_page_request=true", headers={"X-Requested-With": "XMLHttpRequest"})
+        j = pma_json(r)
+        check(f"{name}: a click on its database stays on that server", j.get("success") is True
+              and f"{name}:3306" in str(j.get("menu", "")), str(j.get("error") or j)[:200])
+        fields, out = pma_sql(alice, number, "SELECT CURRENT_USER() AS who")
+        sql_forms[number] = fields
+        check(f"{name}: its SQL box names the server and runs there", fields.get("server") == str(number)
+              and f"{user}@" in out, (fields.get("server"), out[:200]))
+    alice.session.cookies.set("server", str(crm_number), domain="pma.localhost", path="/")
+    r = alice.get(f"{PMA}/index.php?route=/server/databases&server={shop_number}")
+    check("a cookie named 'server' can't move a page to another server", "Shop – Production:3306" in r.text
+          and "CRM – Staging:3306" not in r.text, r.status_code)
+    alice.session.cookies.clear("pma.localhost", "/", "server")
+    r = alice.get(f"{PMA}/index.php")
+    check("no server in the address, two open: phpMyAdmin's server list, no data", r.status_code == 200
+          and "CRM – Staging" in r.text and "Shop – Production" in r.text and "information_schema" not in r.text, r.status_code)
+    j = pma_json(alice.get(f"{PMA}/index.php?route=/database/structure&db=shop&ajax_request=true"))
+    check("a click that names no server goes to none and says so", j.get("success") is False
+          and "doesn't say which server" in str(j.get("error")) and "products" not in json.dumps(j), j)
+    r = alice.get(f"{PMA}/index.php?route=/database/structure&db=shop&server=1")
+    check("an old-style number (a cookie slot) reaches no server", r.status_code == 409 and "Session ended" in r.text, r.status_code)
+    token = html.unescape((re.search(r'name="token" value="([^"]+)"', home.text) or [None, ""])[1])
+    r = alice.post(f"{PMA}/index.php?route=/logout&server={crm_number}", data={"token": token})
+    check("Log out of one server, with another open, closes only that one", r.status_code == 302
+          and r.headers.get("Location", "") == f"{PMA}/__dbportal/close?slot={cookie_slot(crm_cookie)}", f"{r.status_code} {r.headers.get('Location')}")
+    r = alice.get(r.headers.get("Location", PMA + "/"))
+    check("…and returns to the portal", r.status_code == 303 and "notice=closed" in r.headers.get("Location", ""), r.status_code)
+    r = alice.get(f"{PMA}/index.php?route=/database/structure&db=crm&server={crm_number}")
+    check("the closed server's pages say \"Session ended\", never use the other one", r.status_code == 409
+          and "Session ended" in r.text and f"/servers/{crm}/open" in r.text, r.status_code)
+    j = pma_json(alice.get(f"{PMA}/index.php?route=/database/structure&db=crm&server={crm_number}&ajax_request=true"))
+    check("…and inside phpMyAdmin's page, a message instead of another server's page", j.get("success") is False
+          and "no longer open" in str(j.get("error")), j)
+    _, out = pma_sql(alice, shop_number, "SELECT CURRENT_USER() AS who", sql_forms[shop_number])
+    check("the other server's already loaded form still works (no \"Token mismatch\")", "shop_admin@" in out
+          and "mismatch" not in out, out[:200])
+
     print("\n== Each account sees only its own servers")
     bob = User("bob")
     bob.login()
@@ -398,7 +488,7 @@ def main():
     check("database host unreachable from the bastion is reported", not j.get("ok"), j)
     r = alice.form("/servers", dict(ssh, pin_token=pin.get("token", "")))
     check("SSH server saved", r.status_code == 303, r.status_code)
-    page, slot, _ = alice.open(alice.server_ids().get("Office reports"))
+    page, slot, ssh_cookie = alice.open(alice.server_ids().get("Office reports"))
     check("SSH server opens in phpMyAdmin", slot is not None and page.status_code == 200, getattr(page, "status_code", page))
     r = alice.get(f"{PMA}/index.php?route=/server/databases&server={slot}")
     check("database behind the bastion is listed", "reports" in r.text, r.status_code)
@@ -715,7 +805,7 @@ def main():
     check("bob's activity doesn't show alice's servers", "Shop – Production" not in r.text)
 
     print("\n== Closing and signing out")
-    r = alice.get(f"{PMA}/__dbportal/close?slot={slot}")
+    r = alice.get(f"{PMA}/__dbportal/close?slot={cookie_slot(ssh_cookie)}")
     check("phpMyAdmin 'Log out' closes that session and returns to the portal",
           r.status_code == 303 and r.headers.get("Location", "").startswith(PORTAL + "/servers"), r.status_code)
     r = alice.get(PGA + "/logout", headers={"Accept": "text/html"})

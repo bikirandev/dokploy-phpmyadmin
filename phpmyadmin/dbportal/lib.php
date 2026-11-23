@@ -122,7 +122,14 @@ final class Bridge
     public const PREFIX = '__Host-dbp_s';
     public const MAX_SLOTS = 10;
 
-    /** @return array<int, array<string, mixed>> descriptors by slot */
+    /**
+     * phpMyAdmin's number for an open server is the portal's server id plus this offset (the portal's
+     * Tickets::PMA_NUMBER_OFFSET). A number always means the same server, so a tab can't end up on
+     * another one, and it never matches a cookie slot (1-10), which earlier versions used as the number.
+     */
+    public const NUMBER_OFFSET = 1000;
+
+    /** @return array<int, array<string, mixed>> descriptors by phpMyAdmin server number, each with its cookie 'slot' */
     public static function load(): array
     {
         $assertion = $_SERVER['HTTP_X_DBP_ASSERTION'] ?? '';
@@ -151,7 +158,8 @@ final class Bridge
         $out = [];
         foreach ((array) ($response['servers'] ?? []) as $row) {
             $slot = (int) ($row['slot'] ?? 0);
-            if (!isset($keys[$slot])) {
+            $serverId = (int) ($row['server'] ?? 0);
+            if (!isset($keys[$slot]) || $serverId < 1) {
                 continue;
             }
             $key = B64::d($keys[$slot]);
@@ -165,13 +173,93 @@ final class Bridge
             $json = sodium_crypto_aead_xchacha20poly1305_ietf_decrypt($ciphertext, 'dbportal/ticket/' . $idHash, $nonce, $key);
             sodium_memzero($key);
             $descriptor = $json !== false ? json_decode($json, true) : null;
-            if (is_array($descriptor)) {
-                $descriptor['key'] = $idHash;
-                $out[$slot] = $descriptor;
+            if (!is_array($descriptor)) {
+                continue;
+            }
+            $descriptor['key'] = $idHash;
+            $descriptor['slot'] = $slot;
+            $descriptor['opened'] = (int) ($row['opened'] ?? 0);
+            // The same server in two cookies (one left from an earlier portal session): the newest wins.
+            $number = self::NUMBER_OFFSET + $serverId;
+            if (!isset($out[$number]) || $descriptor['opened'] > $out[$number]['opened']) {
+                $out[$number] = $descriptor;
             }
         }
 
         return $out;
+    }
+}
+
+/**
+ * Which open server serves this request. phpMyAdmin writes server=N into its links and forms only
+ * for servers other than $cfg['ServerDefault'], so ServerDefault stays 0 ("none") and every page
+ * names its own server. A request is never handed to a server it didn't name.
+ */
+final class Selection
+{
+    /**
+     * @param array<int, array<string, mixed>> $open descriptors by server number
+     * @return int the server number, or 0 for none (phpMyAdmin then connects to nothing)
+     */
+    public static function choose(array $open): int
+    {
+        $raw = $_REQUEST['server'] ?? null;
+        if ($raw !== null && (!is_string($raw) || !preg_match('/^[1-9][0-9]{0,9}$/', $raw))) {
+            // phpMyAdmin would look anything else up by server name or host; nothing here needs that.
+            unset($_GET['server'], $_POST['server'], $_REQUEST['server']);
+            $raw = null;
+        }
+        if ($raw !== null) {
+            $number = (int) $raw;
+            if (!isset($open[$number])) {
+                Page::ended($number);
+            }
+
+            return $number;
+        }
+        // Nothing named: only the start page picks a server, and only when exactly one is open.
+        // With several, phpMyAdmin shows its server list.
+        if (count($open) === 1 && self::isStartPage()) {
+            $number = (int) array_key_first($open);
+            $_GET['server'] = $_REQUEST['server'] = (string) $number;
+
+            return $number;
+        }
+        if (!empty($_REQUEST['ajax_request'])
+            && (isset($_REQUEST['db']) || isset($_REQUEST['table']) || isset($_REQUEST['sql_query']))) {
+            // A click or query in a page that doesn't name its server (such as one loaded before
+            // this version): phpMyAdmin would only say "No databases selected."
+            Page::unnamed();
+        }
+
+        return 0;
+    }
+
+    /**
+     * phpMyAdmin's "Log out" while other servers are still open in this browser: closes only this
+     * server's session. phpMyAdmin itself would also delete its own session, which every tab shares,
+     * so the other tabs' next form would fail with "Token mismatch".
+     *
+     * @param array<int, array<string, mixed>> $open
+     */
+    public static function logOutOne(array $open, int $number): void
+    {
+        if ($number === 0 || count($open) < 2 || ($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST'
+            || ($_GET['route'] ?? $_POST['route'] ?? '') !== '/logout') {
+            return;
+        }
+        header('Cache-Control: no-store');
+        header('Location: ' . Env::pmaUrl() . '/__dbportal/close?slot=' . (int) $open[$number]['slot'], true, 302);
+        exit;
+    }
+
+    private static function isStartPage(): bool
+    {
+        $script = basename((string) ($_SERVER['SCRIPT_NAME'] ?? ''));
+        $route = $_GET['route'] ?? $_POST['route'] ?? '/';
+
+        return ($_SERVER['REQUEST_METHOD'] ?? '') === 'GET' && $script === 'index.php' && ($route === '/' || $route === '')
+            && !isset($_REQUEST['db']) && !isset($_REQUEST['table']) && !isset($_REQUEST['sql_query']);
     }
 }
 
@@ -928,19 +1016,62 @@ final class Page
 {
     public static function blocked(string $message): never
     {
+        self::show('Connection blocked', $message, [['Back to my servers', Env::portalUrl() . '/servers']]);
+    }
+
+    /** The page names a server that isn't open in this browser (closed, expired or never opened here). */
+    public static function ended(int $number): never
+    {
+        $serverId = $number - Bridge::NUMBER_OFFSET;
+        $links = $serverId > 0 ? [['Open it again', Env::portalUrl() . '/servers/' . $serverId . '/open']] : [];
+        $links[] = ['My servers', Env::portalUrl() . '/servers'];
+        self::show(
+            'Session ended',
+            "This page's server is no longer open in phpMyAdmin: its session was closed or has expired. Open the server again from DB Portal.",
+            $links,
+        );
+    }
+
+    /** A request inside phpMyAdmin that doesn't name its server: it goes to none. */
+    public static function unnamed(): never
+    {
+        self::show(
+            'Which server?',
+            "This page doesn't say which server it is for, so nothing was sent to a database. Reload the page, or open the server again from DB Portal.",
+            [['My servers', Env::portalUrl() . '/servers']],
+        );
+    }
+
+    /** @param list<array{0: string, 1: string}> $links */
+    private static function show(string $title, string $message, array $links): never
+    {
+        header('Cache-Control: no-store');
+        $text = htmlspecialchars($message, ENT_QUOTES);
+        $anchors = implode(' · ', array_map(
+            static fn (array $l): string => '<a class="disableAjax" href="' . htmlspecialchars($l[1], ENT_QUOTES) . '">'
+                . htmlspecialchars($l[0], ENT_QUOTES) . '</a>',
+            $links,
+        ));
+        if (!empty($_REQUEST['ajax_request'])) {
+            // Inside phpMyAdmin's page: its scripts show "error" as a message.
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode([
+                'success' => false,
+                'error' => '<div class="alert alert-danger" role="alert">' . $text . ' ' . $anchors . '</div>',
+            ], JSON_UNESCAPED_SLASHES);
+            exit;
+        }
         http_response_code(409);
         header('Content-Type: text/html; charset=utf-8');
-        header('Cache-Control: no-store');
         header("Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'");
-        $portal = htmlspecialchars(Env::portalUrl() . '/servers', ENT_QUOTES);
-        $text = htmlspecialchars($message, ENT_QUOTES);
+        $heading = htmlspecialchars($title, ENT_QUOTES);
         echo <<<HTML
 <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Connection blocked</title>
+<title>$heading</title>
 <style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0e1013;color:#eceef1;font:15px/1.5 system-ui,sans-serif;padding:20px}
 main{max-width:520px;background:#15181d;border:1px solid #262b34;border-radius:14px;padding:28px;display:flex;flex-direction:column;gap:14px}
 h1{margin:0;font-size:24px}p{margin:0;color:#a7aeba}a{color:#f2b33d}</style></head>
-<body><main><h1>Connection blocked</h1><p>$text</p><p><a href="$portal">Back to my servers</a></p></main></body></html>
+<body><main><h1>$heading</h1><p>$text</p><p>$anchors</p></main></body></html>
 HTML;
         exit;
     }
